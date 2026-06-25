@@ -1,0 +1,17 @@
+# Central configuration for paths, date ranges, variables, region bounds, model settings, and training hyperparameters.
+
+region:
+  name: nepal
+  lat_min: 26.0
+  lat_max: 31.0
+  lon_min: 80.0
+  lon_max: 89.0
+  resolution_deg: 0.05
+
+graph:
+  k_neighbours: 6
+  directed: true
+
+paths:
+  dem_raw: data/raw/srtm_nepal.tif
+  graph_output: data/processed/nepal_graph.pt

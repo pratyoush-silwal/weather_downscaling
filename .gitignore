@@ -1,0 +1,28 @@
+# Data and generated artifacts
+/data/
+/output/
+/outputs/
+/tmp/
+
+# Large geospatial/model artifacts
+*.hgt
+*.hgt.gz
+*.tif
+*.tiff
+*.pt
+*.pth
+*.ckpt
+*.nc
+*.grib
+*.grib2
+
+# Python/runtime cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Local environments
+.env
+.venv/
+venv/
