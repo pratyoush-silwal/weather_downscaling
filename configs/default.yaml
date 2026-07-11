@@ -8,9 +8,162 @@ region:
   lon_max: 89.0
   resolution_deg: 0.05
 
+era5:
+  start_date: 1990-01-01
+  end_date: 2022-12-31
+  years:
+    - "1990"
+    - "1991"
+    - "1992"
+    - "1993"
+    - "1994"
+    - "1995"
+    - "1996"
+    - "1997"
+    - "1998"
+    - "1999"
+    - "2000"
+    - "2001"
+    - "2002"
+    - "2003"
+    - "2004"
+    - "2005"
+    - "2006"
+    - "2007"
+    - "2008"
+    - "2009"
+    - "2010"
+    - "2011"
+    - "2012"
+    - "2013"
+    - "2014"
+    - "2015"
+    - "2016"
+    - "2017"
+    - "2018"
+    - "2019"
+    - "2020"
+    - "2021"
+    - "2022"
+  months:
+    - "01"
+    - "02"
+    - "03"
+    - "04"
+    - "05"
+    - "06"
+    - "07"
+    - "08"
+    - "09"
+    - "10"
+    - "11"
+    - "12"
+  days:
+    - "01"
+    - "02"
+    - "03"
+    - "04"
+    - "05"
+    - "06"
+    - "07"
+    - "08"
+    - "09"
+    - "10"
+    - "11"
+    - "12"
+    - "13"
+    - "14"
+    - "15"
+    - "16"
+    - "17"
+    - "18"
+    - "19"
+    - "20"
+    - "21"
+    - "22"
+    - "23"
+    - "24"
+    - "25"
+    - "26"
+    - "27"
+    - "28"
+    - "29"
+    - "30"
+    - "31"
+  times:
+    - "00:00"
+    - "01:00"
+    - "02:00"
+    - "03:00"
+    - "04:00"
+    - "05:00"
+    - "06:00"
+    - "07:00"
+    - "08:00"
+    - "09:00"
+    - "10:00"
+    - "11:00"
+    - "12:00"
+    - "13:00"
+    - "14:00"
+    - "15:00"
+    - "16:00"
+    - "17:00"
+    - "18:00"
+    - "19:00"
+    - "20:00"
+    - "21:00"
+    - "22:00"
+    - "23:00"
+  output_dir: data/raw/era5
+  format: netcdf
+  variables:
+    single_levels:
+      - 2m_temperature
+      - 10m_u_component_of_wind
+      - 10m_v_component_of_wind
+    pressure_levels:
+      - name: specific_humidity
+        pressure_level: "850"
+      - name: geopotential
+        pressure_level: "500"
+
 graph:
   k_neighbours: 6
   directed: true
+
+model:
+  name: pignn
+  node_input_channels: 10
+  edge_input_channels: 3
+  hidden_channels: 128
+  edge_hidden_channels: 32
+  message_hidden_channels: 128
+  output_channels: 2
+  num_layers: 4
+  dropout: 0.1
+  precipitation_channel: 1
+  use_coarse_temperature_residual: true
+  use_coarse_precipitation_residual: false
+
+loss:
+  data_loss: mse
+  weights:
+    data: 1.0
+    lapse_rate: 0.0
+    precipitation_nonnegative: 0.0
+    smoothness: 0.0
+  channel_weights: null
+  temperature_channel: 0
+  precipitation_channel: 1
+  lapse_rate_k_per_m: -0.0065
+
+training:
+  batch_size: 1
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  epochs: 50
+  gradient_clip_norm: 1.0
 
 paths:
   dem_raw: data/raw/srtm_nepal.tif

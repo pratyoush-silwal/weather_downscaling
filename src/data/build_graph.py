@@ -2,16 +2,18 @@
 """Build the static Nepal terrain-aware graph described in the project report.
 
 The saved package is a plain ``torch.save`` dictionary so it works without
-torch_geometric. Its tensor keys match PyG naming conventions:
+torch_geometric. The topology and terrain features are static and should be
+reused for every ERA5 timestep:
 
-    x:          float32 [N, 10]
+    pos:        float32 [N, 2]
     edge_index: int64   [2, E]
     edge_attr:  float32 [E, 3]
-    y:          float32 [N, 2], NaN placeholder labels
+    static_x:   float32 [N, 3], elevation/slope/aspect
 
-The 10 node channels follow the System Architecture section:
-T_coarse, Q_coarse, U_coarse, V_coarse, Z_coarse, elevation, slope, aspect,
-sin(2*pi*t/365), cos(2*pi*t/365).
+For backward compatibility the package also includes an ``x``/``x_raw``
+template with zero atmospheric channels and placeholder temporal channels.
+Training should use ``static_x`` plus dynamic ERA5 tensors produced by
+``preprocess_era5.py``.
 """
 
 from __future__ import annotations
@@ -39,6 +41,25 @@ NODE_FEATURE_NAMES = [
     "elevation_m",
     "slope_rad",
     "aspect_rad",
+    "day_of_year_sin",
+    "day_of_year_cos",
+]
+
+DYNAMIC_FEATURE_NAMES = [
+    "t2m_coarse",
+    "q850_coarse",
+    "u10m_coarse",
+    "v10m_coarse",
+    "z500_coarse",
+]
+
+STATIC_FEATURE_NAMES = [
+    "elevation_m",
+    "slope_rad",
+    "aspect_rad",
+]
+
+TEMPORAL_FEATURE_NAMES = [
     "day_of_year_sin",
     "day_of_year_cos",
 ]
@@ -77,10 +98,14 @@ class GeoTiffInfo:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build the Nepal PI-GNN graph package.")
+    parser = argparse.ArgumentParser(
+        description="Build the Nepal PI-GNN graph package."
+    )
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--dem", default=None, help="Override DEM path from config.")
-    parser.add_argument("--output", default=None, help="Override graph output path from config.")
+    parser.add_argument(
+        "--output", default=None, help="Override graph output path from config."
+    )
     parser.add_argument(
         "--stations",
         default=None,
@@ -146,7 +171,9 @@ def read_tiff_tags(path: Path) -> tuple[str, dict[int, tuple[int, int, object]]]
         tags: dict[int, tuple[int, int, object]] = {}
 
         for _ in range(entry_count):
-            tag, type_id, count, raw_value = struct.unpack(endian + "HHI4s", handle.read(12))
+            tag, type_id, count, raw_value = struct.unpack(
+                endian + "HHI4s", handle.read(12)
+            )
             if type_id not in TIFF_TYPES:
                 continue
             fmt, size = TIFF_TYPES[type_id]
@@ -226,7 +253,9 @@ def make_regular_nodes(region: dict) -> tuple[np.ndarray, np.ndarray, list[str]]
     return coords[:, 0], coords[:, 1], node_type
 
 
-def read_station_nodes(path: str | Path | None) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, list[str]]:
+def read_station_nodes(
+    path: str | Path | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray | None, list[str]]:
     if path is None:
         return np.array([], dtype=np.float64), np.array([], dtype=np.float64), None, []
 
@@ -259,7 +288,9 @@ def read_station_nodes(path: str | Path | None) -> tuple[np.ndarray, np.ndarray,
     )
 
 
-def latlon_to_pixel(info: GeoTiffInfo, lat: np.ndarray, lon: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def latlon_to_pixel(
+    info: GeoTiffInfo, lat: np.ndarray, lon: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     cols = np.rint((lon - info.lon_min) / info.pixel_width).astype(np.int64)
     rows = np.rint((info.lat_max - lat) / info.pixel_height).astype(np.int64)
     rows = np.clip(rows, 1, info.height - 2)
@@ -275,12 +306,16 @@ def read_dem_rows(info: GeoTiffInfo, rows: Iterable[int]) -> dict[int, np.ndarra
         for strip_index, offset in enumerate(info.strip_offsets):
             first_row = strip_index * info.rows_per_strip
             row_count = min(info.rows_per_strip, info.height - first_row)
-            strip_rows = [row for row in wanted if first_row <= row < first_row + row_count]
+            strip_rows = [
+                row for row in wanted if first_row <= row < first_row + row_count
+            ]
             if not strip_rows:
                 continue
             handle.seek(offset)
             raw = handle.read(info.strip_byte_counts[strip_index])
-            strip = np.frombuffer(raw, dtype=info.endian + "i2").reshape(row_count, info.width)
+            strip = np.frombuffer(raw, dtype=info.endian + "i2").reshape(
+                row_count, info.width
+            )
             for row in strip_rows:
                 if row in wanted_set:
                     out[row] = strip[row - first_row, :].astype(np.float32)
@@ -327,7 +362,9 @@ def sample_terrain(
         ) / 8.0
 
         meters_per_deg_lat = 111_320.0
-        meters_per_deg_lon = meters_per_deg_lat * math.cos(math.radians(float(lat_value)))
+        meters_per_deg_lon = meters_per_deg_lat * math.cos(
+            math.radians(float(lat_value))
+        )
         dz_dx = dz_dcol / (info.pixel_width * meters_per_deg_lon)
         dz_dy = -dz_drow / (info.pixel_height * meters_per_deg_lat)
 
@@ -338,7 +375,9 @@ def sample_terrain(
     return elevation, slope, aspect
 
 
-def geodetic_to_ecef(lat: np.ndarray, lon: np.ndarray, height_m: np.ndarray) -> np.ndarray:
+def geodetic_to_ecef(
+    lat: np.ndarray, lon: np.ndarray, height_m: np.ndarray
+) -> np.ndarray:
     semi_major = 6_378_137.0
     eccentricity_sq = 6.69437999014e-3
     lat_rad = np.radians(lat)
@@ -359,7 +398,10 @@ def haversine_distance_m(lat1, lon1, lat2, lon2) -> np.ndarray:
     phi2 = np.radians(lat2)
     dphi = np.radians(lat2 - lat1)
     dlambda = np.radians(lon2 - lon1)
-    a = np.sin(dphi / 2.0) ** 2 + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2.0) ** 2
+    a = (
+        np.sin(dphi / 2.0) ** 2
+        + np.cos(phi1) * np.cos(phi2) * np.sin(dlambda / 2.0) ** 2
+    )
     return 2.0 * radius * np.arcsin(np.sqrt(np.clip(a, 0.0, 1.0)))
 
 
@@ -382,7 +424,9 @@ def build_edges(
     distance = haversine_distance_m(lat[src], lon[src], lat[dst], lon[dst])
     elevation_delta = elevation[dst] - elevation[src]
     aspect_alignment = np.cos(aspect[src] - aspect[dst])
-    edge_attr = np.column_stack([distance, elevation_delta, aspect_alignment]).astype(np.float32)
+    edge_attr = np.column_stack([distance, elevation_delta, aspect_alignment]).astype(
+        np.float32
+    )
     return edge_index, edge_attr
 
 
@@ -390,7 +434,11 @@ def normalise_features(x: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarra
     mean = x.mean(axis=0)
     std = x.std(axis=0)
     std = np.where(std < 1e-6, 1.0, std)
-    return ((x - mean) / std).astype(np.float32), mean.astype(np.float32), std.astype(np.float32)
+    return (
+        ((x - mean) / std).astype(np.float32),
+        mean.astype(np.float32),
+        std.astype(np.float32),
+    )
 
 
 def main() -> None:
@@ -405,7 +453,9 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     grid_lat, grid_lon, node_types = make_regular_nodes(region)
-    station_lat, station_lon, station_elev, station_types = read_station_nodes(args.stations)
+    station_lat, station_lon, station_elev, station_types = read_station_nodes(
+        args.stations
+    )
     lat = np.concatenate([grid_lat, station_lat])
     lon = np.concatenate([grid_lon, station_lon])
     node_types.extend(station_types)
@@ -415,10 +465,12 @@ def main() -> None:
     if station_elev is not None and station_elev.size:
         start = grid_lat.shape[0]
         mask = np.isfinite(station_elev)
-        elevation[start : start + station_elev.shape[0]][mask] = station_elev[mask].astype(np.float32)
+        elevation[start : start + station_elev.shape[0]][mask] = station_elev[
+            mask
+        ].astype(np.float32)
 
     day_angle = 2.0 * math.pi * int(args.day_of_year) / 365.0
-    atmospheric = np.zeros((lat.shape[0], 5), dtype=np.float32)
+    atmospheric = np.zeros((lat.shape[0], 5), dtype=np.float32)  # replace after era5
     temporal = np.tile(
         np.array([math.sin(day_angle), math.cos(day_angle)], dtype=np.float32),
         (lat.shape[0], 1),
@@ -445,6 +497,7 @@ def main() -> None:
     package = {
         "x": torch.from_numpy(x),
         "x_raw": torch.from_numpy(x_raw),
+        "static_x": torch.from_numpy(terrain),
         "edge_index": torch.from_numpy(edge_index),
         "edge_attr": torch.from_numpy(edge_attr),
         "y": torch.from_numpy(y),
@@ -457,6 +510,9 @@ def main() -> None:
         "metadata": {
             "region": region,
             "node_feature_names": NODE_FEATURE_NAMES,
+            "dynamic_feature_names": DYNAMIC_FEATURE_NAMES,
+            "static_feature_names": STATIC_FEATURE_NAMES,
+            "temporal_feature_names": TEMPORAL_FEATURE_NAMES,
             "edge_attr_names": EDGE_ATTR_NAMES,
             "label_names": ["t2m_target", "precipitation_target"],
             "node_type_counts": {
@@ -468,7 +524,11 @@ def main() -> None:
             "station_path": str(resolve_path(args.stations)) if args.stations else None,
             "day_of_year": int(args.day_of_year),
             "normalised": bool(args.normalise),
-            "format": "plain_torch_graph_package_v1",
+            "format": "static_terrain_graph_v2",
+            "compatibility_note": (
+                "x/x_raw are templates only; dynamic ERA5 atmospheric and temporal "
+                "features are stored separately and combined by dataset.py."
+            ),
         },
     }
 
@@ -479,7 +539,9 @@ def main() -> None:
     print(f"x: {tuple(package['x'].shape)}")
     print(f"edge_index: {tuple(package['edge_index'].shape)}")
     print(f"edge_attr: {tuple(package['edge_attr'].shape)}")
-    print(f"elevation range: {float(np.nanmin(elevation)):.1f} m to {float(np.nanmax(elevation)):.1f} m")
+    print(
+        f"elevation range: {float(np.nanmin(elevation)):.1f} m to {float(np.nanmax(elevation)):.1f} m"
+    )
 
 
 if __name__ == "__main__":

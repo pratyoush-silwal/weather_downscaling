@@ -1,1 +1,9 @@
-# Project dependencies will be listed here once the environment is finalized.
+cdsapi
+matplotlib
+netCDF4
+numpy
+pandas
+PyYAML
+scipy
+torch
+xarray
