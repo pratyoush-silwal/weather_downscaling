@@ -24,12 +24,13 @@ class PIGNNConfig:
     hidden_channels: int = 128
     edge_hidden_channels: int = 32
     message_hidden_channels: int = 128
-    output_channels: int = 2
+    output_channels: int = 4
     num_layers: int = 4
     dropout: float = 0.1
     precipitation_channel: int | None = 1
     use_coarse_temperature_residual: bool = True
     use_coarse_precipitation_residual: bool = False
+    use_coarse_wind_residual: bool = True
 
 
 class PIGNN(nn.Module):
@@ -43,8 +44,8 @@ class PIGNN(nn.Module):
 
     Outputs:
 
-    * ``[N, 2]`` or ``[B, N, 2]`` predictions. By convention channel 0 is
-      temperature and channel 1 is precipitation.
+    * ``[N, 4]`` or ``[B, N, 4]`` predictions. By convention channels are:
+      temperature, precipitation, u wind, v wind.
 
     The model is not time-recurrent. Each timestep is a sample on the same
     static graph. Temporal context can later be added by feeding lagged dynamic
@@ -126,6 +127,9 @@ class PIGNN(nn.Module):
             channels[0] = channels[0] + x[..., 0]
         if self.config.use_coarse_precipitation_residual and self.config.output_channels >= 2:
             channels[1] = channels[1] + x[..., 1]
+        if self.config.use_coarse_wind_residual and self.config.output_channels >= 4:
+            channels[2] = channels[2] + x[..., 2]
+            channels[3] = channels[3] + x[..., 3]
         return torch.stack(channels, dim=-1)
 
 

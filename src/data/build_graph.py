@@ -493,7 +493,7 @@ def main() -> None:
         k=int(graph_config["k_neighbours"]),
     )
 
-    y = np.full((lat.shape[0], 2), np.nan, dtype=np.float32)
+    y = np.full((lat.shape[0], 4), np.nan, dtype=np.float32)
     package = {
         "x": torch.from_numpy(x),
         "x_raw": torch.from_numpy(x_raw),
@@ -514,7 +514,7 @@ def main() -> None:
             "static_feature_names": STATIC_FEATURE_NAMES,
             "temporal_feature_names": TEMPORAL_FEATURE_NAMES,
             "edge_attr_names": EDGE_ATTR_NAMES,
-            "label_names": ["t2m_target", "precipitation_target"],
+            "label_names": ["t2m_target", "precipitation_target", "u10m_target", "v10m_target"],
             "node_type_counts": {
                 "grid": node_types.count("grid"),
                 "station": node_types.count("station"),

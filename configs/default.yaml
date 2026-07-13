@@ -139,23 +139,24 @@ model:
   hidden_channels: 128
   edge_hidden_channels: 32
   message_hidden_channels: 128
-  output_channels: 2
+  output_channels: 4
   num_layers: 4
   dropout: 0.1
   precipitation_channel: 1
   use_coarse_temperature_residual: true
   use_coarse_precipitation_residual: false
+  use_coarse_wind_residual: true
 
 loss:
   data_loss: mse
   weights:
     data: 1.0
     lapse_rate: 0.0
-    precipitation_nonnegative: 0.0
-    smoothness: 0.0
+    divergence: 0.0
   channel_weights: null
   temperature_channel: 0
-  precipitation_channel: 1
+  u_channel: 2
+  v_channel: 3
   lapse_rate_k_per_m: -0.0065
 
 training:

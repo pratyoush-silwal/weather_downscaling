@@ -97,39 +97,77 @@ def lapse_rate_loss(
     raise ValueError(f"Unsupported lapse-rate loss: {loss}")
 
 
-def precipitation_nonnegative_loss(
-    prediction: torch.Tensor,
-    precipitation_channel: int = 1,
-) -> torch.Tensor:
-    if precipitation_channel >= prediction.shape[-1]:
-        return prediction.new_tensor(0.0)
-    precip = prediction[..., precipitation_channel]
-    return F.relu(-precip).pow(2).mean()
+def _ensure_batched_nodes(values: torch.Tensor) -> tuple[torch.Tensor, bool]:
+    if values.ndim == 2:
+        return values.unsqueeze(0), False
+    if values.ndim == 3:
+        return values, True
+    raise ValueError(f"Expected [N,C] or [B,N,C], got {tuple(values.shape)}")
 
 
-def edge_smoothness_loss(
+def _edge_displacements_m(pos: torch.Tensor, edge_index: torch.Tensor, dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+    src = edge_index[0].to(pos.device).long()
+    dst = edge_index[1].to(pos.device).long()
+    lat = pos[:, 0].to(dtype=dtype)
+    lon = pos[:, 1].to(dtype=dtype)
+    mean_lat_rad = torch.deg2rad((lat[src] + lat[dst]) * 0.5)
+    meters_per_deg_lat = 111_320.0
+    meters_per_deg_lon = meters_per_deg_lat * torch.cos(mean_lat_rad)
+    dx = (lon[dst] - lon[src]) * meters_per_deg_lon
+    dy = (lat[dst] - lat[src]) * meters_per_deg_lat
+    return dx, dy
+
+
+def graph_divergence_loss(
     prediction: torch.Tensor,
     edge_index: torch.Tensor,
-    channels: tuple[int, ...] = (0, 1),
-    huber: bool = True,
+    pos: torch.Tensor,
+    u_channel: int = 2,
+    v_channel: int = 3,
+    eps: float = 1.0,
 ) -> torch.Tensor:
-    values = prediction[..., list(channels)]
-    if values.ndim == 2:
-        values = values.unsqueeze(0)
-    src = edge_index[0].to(prediction.device).long()
-    dst = edge_index[1].to(prediction.device).long()
-    diff = values[:, dst, :] - values[:, src, :]
-    if huber:
-        return F.smooth_l1_loss(diff, torch.zeros_like(diff))
-    return diff.pow(2).mean()
+    """Softly penalize horizontal wind divergence on the graph.
+
+    This approximates divergence from edge-wise directional derivatives:
+
+        ((u_j - u_i) * dx + (v_j - v_i) * dy) / (dx^2 + dy^2)
+
+    then averages outgoing edge contributions per source node. It is a weak
+    regularizer, not a strict incompressibility constraint.
+    """
+
+    if max(u_channel, v_channel) >= prediction.shape[-1]:
+        return prediction.new_tensor(0.0)
+
+    pred, _ = _ensure_batched_nodes(prediction)
+    edge_index = edge_index.to(prediction.device)
+    pos = pos.to(device=prediction.device, dtype=prediction.dtype)
+    src = edge_index[0].long()
+    dst = edge_index[1].long()
+
+    dx, dy = _edge_displacements_m(pos, edge_index, prediction.dtype)
+    dist_sq = (dx * dx + dy * dy).clamp_min(eps)
+
+    du = pred[:, dst, u_channel] - pred[:, src, u_channel]
+    dv = pred[:, dst, v_channel] - pred[:, src, v_channel]
+    edge_divergence = (du * dx.view(1, -1) + dv * dy.view(1, -1)) / dist_sq.view(1, -1)
+
+    batch_size, node_count = pred.shape[0], pred.shape[1]
+    node_divergence = pred.new_zeros(batch_size, node_count)
+    node_divergence.index_add_(1, src, edge_divergence)
+    degree = torch.bincount(src, minlength=node_count).to(
+        device=prediction.device,
+        dtype=prediction.dtype,
+    )
+    node_divergence = node_divergence / degree.clamp_min(1.0).view(1, -1)
+    return node_divergence.pow(2).mean()
 
 
 @dataclass(frozen=True)
 class LossWeights:
     data: float = 1.0
     lapse_rate: float = 0.0
-    precipitation_nonnegative: float = 0.0
-    smoothness: float = 0.0
+    divergence: float = 0.0
 
 
 class PIGNNLoss(nn.Module):
@@ -145,14 +183,16 @@ class PIGNNLoss(nn.Module):
         data_loss: str = "mse",
         channel_weights: tuple[float, ...] | None = None,
         temperature_channel: int = 0,
-        precipitation_channel: int = 1,
+        u_channel: int = 2,
+        v_channel: int = 3,
         lapse_rate_k_per_m: float = -0.0065,
     ) -> None:
         super().__init__()
         self.weights = weights or LossWeights()
         self.data_loss = data_loss
         self.temperature_channel = temperature_channel
-        self.precipitation_channel = precipitation_channel
+        self.u_channel = u_channel
+        self.v_channel = v_channel
         self.lapse_rate_k_per_m = lapse_rate_k_per_m
         if channel_weights is None:
             self.register_buffer("channel_weights", None)
@@ -165,6 +205,7 @@ class PIGNNLoss(nn.Module):
         target: torch.Tensor | None,
         edge_index: torch.Tensor,
         elevation: torch.Tensor,
+        pos: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         components: dict[str, torch.Tensor] = {}
 
@@ -185,17 +226,18 @@ class PIGNNLoss(nn.Module):
             temperature_channel=self.temperature_channel,
             lapse_rate_k_per_m=self.lapse_rate_k_per_m,
         )
-        components["precipitation_nonnegative"] = precipitation_nonnegative_loss(
+        components["divergence"] = graph_divergence_loss(
             prediction=prediction,
-            precipitation_channel=self.precipitation_channel,
+            edge_index=edge_index,
+            pos=pos,
+            u_channel=self.u_channel,
+            v_channel=self.v_channel,
         )
-        components["smoothness"] = edge_smoothness_loss(prediction, edge_index)
 
         total = (
             self.weights.data * components["data"]
             + self.weights.lapse_rate * components["lapse_rate"]
-            + self.weights.precipitation_nonnegative * components["precipitation_nonnegative"]
-            + self.weights.smoothness * components["smoothness"]
+            + self.weights.divergence * components["divergence"]
         )
         components["total"] = total
         return components
