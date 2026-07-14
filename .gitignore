@@ -3,6 +3,7 @@
 /output/
 /outputs/
 /tmp/
+/images/
 
 # Large geospatial/model artifacts
 *.hgt
