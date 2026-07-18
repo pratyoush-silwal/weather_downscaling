@@ -18,6 +18,7 @@ FULL_FEATURE_NAMES = [
     "u10m_coarse",
     "v10m_coarse",
     "z500_coarse",
+    "tp_coarse",
     "elevation_m",
     "slope_rad",
     "aspect_rad",
@@ -37,7 +38,11 @@ def _static_x(graph: dict) -> torch.Tensor:
     if "static_x" in graph:
         return graph["static_x"].float()
     if "x_raw" in graph:
-        return graph["x_raw"][:, 5:8].float()
+        feature_names = graph.get("metadata", {}).get("node_feature_names", [])
+        if "elevation_m" in feature_names:
+            start = feature_names.index("elevation_m")
+            return graph["x_raw"][:, start : start + 3].float()
+        return graph["x_raw"][:, -5:-2].float()
     if all(key in graph for key in ["elevation", "slope", "aspect"]):
         return torch.stack(
             [graph["elevation"], graph["slope"], graph["aspect"]],
@@ -66,7 +71,7 @@ class WeatherGraphDataset(Dataset):
     time. Each item returns a plain dictionary so the code works without
     torch_geometric:
 
-        x:          [N, 10]
+        x:          [N, 11]
         edge_index: [2, E]
         edge_attr:  [E, C_edge]
         y:          optional [N, C_target]

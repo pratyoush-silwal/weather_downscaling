@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Download ERA5 inputs for the configured project region.
 
-The project needs five ERA5 predictors:
+The project needs six ERA5 predictors:
 
 * 2m temperature
 * 10m u wind
 * 10m v wind
+* total precipitation
 * specific humidity at 850 hPa
 * geopotential at 500 hPa
 
@@ -32,6 +33,7 @@ SINGLE_LEVEL_VARIABLES = [
     "2m_temperature",
     "10m_u_component_of_wind",
     "10m_v_component_of_wind",
+    "total_precipitation",
 ]
 
 PRESSURE_LEVEL_REQUESTS = [
@@ -76,6 +78,12 @@ def parse_args() -> argparse.Namespace:
         "--overwrite",
         action="store_true",
         help="Download even if the target file already exists.",
+    )
+    parser.add_argument(
+        "--request-group",
+        choices=["all", "single", "pressure"],
+        default="all",
+        help="Which ERA5 file group to request.",
     )
     return parser.parse_args()
 
@@ -172,6 +180,7 @@ def download_month(
     area: list[float],
     data_format: str,
     overwrite: bool,
+    request_group: str = "all",
 ) -> None:
     suffix = "nc" if data_format == "netcdf" else "grib"
     base_request = monthly_base_request(
@@ -183,28 +192,30 @@ def download_month(
         data_format=data_format,
     )
 
-    single_target = output_dir / f"era5_single_levels_{year}{month:02d}.{suffix}"
-    retrieve(
-        client,
-        SINGLE_LEVEL_DATASET,
-        {**base_request, "variable": SINGLE_LEVEL_VARIABLES},
-        single_target,
-        overwrite,
-    )
-
-    for label, variable, pressure_level in PRESSURE_LEVEL_REQUESTS:
-        target = output_dir / f"era5_{label}_{year}{month:02d}.{suffix}"
+    if request_group in {"all", "single"}:
+        single_target = output_dir / f"era5_single_levels_{year}{month:02d}.{suffix}"
         retrieve(
             client,
-            PRESSURE_LEVEL_DATASET,
-            {
-                **base_request,
-                "variable": [variable],
-                "pressure_level": [pressure_level],
-            },
-            target,
+            SINGLE_LEVEL_DATASET,
+            {**base_request, "variable": SINGLE_LEVEL_VARIABLES},
+            single_target,
             overwrite,
         )
+
+    if request_group in {"all", "pressure"}:
+        for label, variable, pressure_level in PRESSURE_LEVEL_REQUESTS:
+            target = output_dir / f"era5_{label}_{year}{month:02d}.{suffix}"
+            retrieve(
+                client,
+                PRESSURE_LEVEL_DATASET,
+                {
+                    **base_request,
+                    "variable": [variable],
+                    "pressure_level": [pressure_level],
+                },
+                target,
+                overwrite,
+            )
 
 
 def main() -> None:
@@ -244,6 +255,7 @@ def main() -> None:
             area=area,
             data_format=data_format,
             overwrite=args.overwrite,
+            request_group=args.request_group,
         )
 
 

@@ -17,6 +17,9 @@
 *.grib
 *.grib2
 
+#drawio files
+*.drawio
+
 # Python/runtime cache
 __pycache__/
 *.py[cod]

@@ -38,6 +38,7 @@ NODE_FEATURE_NAMES = [
     "u10m_coarse",
     "v10m_coarse",
     "z500_coarse",
+    "tp_coarse",
     "elevation_m",
     "slope_rad",
     "aspect_rad",
@@ -51,6 +52,7 @@ DYNAMIC_FEATURE_NAMES = [
     "u10m_coarse",
     "v10m_coarse",
     "z500_coarse",
+    "tp_coarse",
 ]
 
 STATIC_FEATURE_NAMES = [
@@ -470,7 +472,7 @@ def main() -> None:
         ].astype(np.float32)
 
     day_angle = 2.0 * math.pi * int(args.day_of_year) / 365.0
-    atmospheric = np.zeros((lat.shape[0], 5), dtype=np.float32)  # replace after era5
+    atmospheric = np.zeros((lat.shape[0], 6), dtype=np.float32)  # replace after era5
     temporal = np.tile(
         np.array([math.sin(day_angle), math.cos(day_angle)], dtype=np.float32),
         (lat.shape[0], 1),

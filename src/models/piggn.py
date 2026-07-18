@@ -15,11 +15,11 @@ class PIGNNConfig:
     """Configuration for :class:`PIGNN`.
 
     The default input layout matches ``WeatherGraphDataset``:
-    five dynamic atmospheric channels, three static terrain channels, and two
+    six dynamic atmospheric channels, three static terrain channels, and two
     temporal channels.
     """
 
-    node_input_channels: int = 10
+    node_input_channels: int = 11
     edge_input_channels: int = 3
     hidden_channels: int = 128
     edge_hidden_channels: int = 32
@@ -28,8 +28,12 @@ class PIGNNConfig:
     num_layers: int = 4
     dropout: float = 0.1
     precipitation_channel: int | None = 1
+    coarse_temperature_channel: int = 0
+    coarse_precipitation_channel: int = 5
+    coarse_u_channel: int = 2
+    coarse_v_channel: int = 3
     use_coarse_temperature_residual: bool = True
-    use_coarse_precipitation_residual: bool = False
+    use_coarse_precipitation_residual: bool = True
     use_coarse_wind_residual: bool = True
 
 
@@ -38,7 +42,7 @@ class PIGNN(nn.Module):
 
     Inputs:
 
-    * ``x``: ``[N, 10]`` or ``[B, N, 10]`` node features.
+    * ``x``: ``[N, 11]`` or ``[B, N, 11]`` node features.
     * ``edge_index``: ``[2, E]`` fixed directed k-NN graph.
     * ``edge_attr``: ``[E, 3]`` fixed edge attributes.
 
@@ -124,12 +128,12 @@ class PIGNN(nn.Module):
 
         channels = list(torch.unbind(out, dim=-1))
         if self.config.use_coarse_temperature_residual and self.config.output_channels >= 1:
-            channels[0] = channels[0] + x[..., 0]
+            channels[0] = channels[0] + x[..., self.config.coarse_temperature_channel]
         if self.config.use_coarse_precipitation_residual and self.config.output_channels >= 2:
-            channels[1] = channels[1] + x[..., 1]
+            channels[1] = channels[1] + x[..., self.config.coarse_precipitation_channel]
         if self.config.use_coarse_wind_residual and self.config.output_channels >= 4:
-            channels[2] = channels[2] + x[..., 2]
-            channels[3] = channels[3] + x[..., 3]
+            channels[2] = channels[2] + x[..., self.config.coarse_u_channel]
+            channels[3] = channels[3] + x[..., self.config.coarse_v_channel]
         return torch.stack(channels, dim=-1)
 
 

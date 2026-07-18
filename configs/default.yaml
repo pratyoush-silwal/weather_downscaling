@@ -116,12 +116,14 @@ era5:
     - "22:00"
     - "23:00"
   output_dir: data/raw/era5
+  processed_output_dir: data/processed/era5_dynamic_11ch
   format: netcdf
   variables:
     single_levels:
       - 2m_temperature
       - 10m_u_component_of_wind
       - 10m_v_component_of_wind
+      - total_precipitation
     pressure_levels:
       - name: specific_humidity
         pressure_level: "850"
@@ -134,7 +136,7 @@ graph:
 
 model:
   name: pignn
-  node_input_channels: 10
+  node_input_channels: 11
   edge_input_channels: 3
   hidden_channels: 128
   edge_hidden_channels: 32
@@ -143,9 +145,25 @@ model:
   num_layers: 4
   dropout: 0.1
   precipitation_channel: 1
+  coarse_temperature_channel: 0
+  coarse_precipitation_channel: 5
+  coarse_u_channel: 2
+  coarse_v_channel: 3
   use_coarse_temperature_residual: true
-  use_coarse_precipitation_residual: false
+  use_coarse_precipitation_residual: true
   use_coarse_wind_residual: true
+  feature_names:
+    - t2m_coarse
+    - q850_coarse
+    - u10m_coarse
+    - v10m_coarse
+    - z500_coarse
+    - tp_coarse
+    - elevation_m
+    - slope_rad
+    - aspect_rad
+    - day_of_year_sin
+    - day_of_year_cos
 
 loss:
   data_loss: mse

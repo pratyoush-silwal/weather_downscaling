@@ -4,7 +4,7 @@
 For every complete month, this script interpolates ERA5 fields onto the static
 graph nodes and writes:
 
-    x_dynamic:     float32 [T, N, 5]
+    x_dynamic:     float32 [T, N, 6]
     time_features: float32 [T, 2]
     timestamps:    list[str] length T
 
@@ -33,6 +33,7 @@ ATMOSPHERIC_CHANNELS = [
     "u10m_coarse",
     "v10m_coarse",
     "z500_coarse",
+    "tp_coarse",
 ]
 
 OUTPUT_FEATURE_NAMES = [
@@ -53,6 +54,7 @@ VARIABLE_CANDIDATES = {
     "t2m": ["t2m", "2t", "2m_temperature"],
     "u10": ["u10", "10u", "10m_u_component_of_wind"],
     "v10": ["v10", "10v", "10m_v_component_of_wind"],
+    "tp": ["tp", "total_precipitation"],
     "q850": ["q", "specific_humidity"],
     "z500": ["z", "geopotential"],
 }
@@ -65,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-dir", default=None, help="Raw ERA5 directory. Defaults to era5.output_dir.")
     parser.add_argument(
         "--output-dir",
-        default="data/processed/era5_dynamic",
+        default=None,
         help="Directory for processed monthly dynamic tensors.",
     )
     parser.add_argument("--start-date", default=None, help="Inclusive start date YYYY-MM-DD.")
@@ -304,6 +306,7 @@ def preprocess_month(xr, graph: dict, input_dir: Path, output_dir: Path, yyyymm:
             "t2m": single[variable_name(single, "t2m")],
             "u10": single[variable_name(single, "u10")],
             "v10": single[variable_name(single, "v10")],
+            "tp": single[variable_name(single, "tp")],
             "q850": q850[variable_name(q850, "q850")],
             "z500": z500[variable_name(z500, "z500")],
         }
@@ -319,6 +322,7 @@ def preprocess_month(xr, graph: dict, input_dir: Path, output_dir: Path, yyyymm:
                 arrays["u10"].values,
                 arrays["v10"].values,
                 arrays["z500"].values / 9.80665 if args.z500_as_height else arrays["z500"].values,
+                arrays["tp"].values,
             ],
             axis=-1,
         ).astype(np.float32)
@@ -362,7 +366,9 @@ def main() -> None:
 
     graph_path = resolve_path(args.graph or config["paths"]["graph_output"])
     input_dir = resolve_path(args.input_dir or era5_config.get("output_dir", "data/raw/era5"))
-    output_dir = resolve_path(args.output_dir)
+    output_dir = resolve_path(
+        args.output_dir or era5_config.get("processed_output_dir", "data/processed/era5_dynamic_11ch")
+    )
 
     if args.months:
         months = args.months
