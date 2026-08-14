@@ -130,6 +130,24 @@ era5:
       - name: geopotential
         pressure_level: "500"
 
+era5land:
+  start_date: 1990-01-01
+  end_date: 2022-12-31
+  output_dir: data/raw/era5land
+  processed_output_dir: data/processed/targets_era5land
+  format: netcdf
+  variables:
+    - 2m_temperature
+    - 10m_u_component_of_wind
+    - 10m_v_component_of_wind
+
+mswep:
+  input_dir: data/raw/mswep
+  processed_output_dir: data/processed/targets_mswep
+
+targets:
+  output_dir: data/processed/targets
+
 graph:
   k_neighbours: 6
   directed: true
@@ -183,6 +201,10 @@ training:
   weight_decay: 0.00001
   epochs: 50
   gradient_clip_norm: 1.0
+  validation_months: 12
+  checkpoint_dir: checkpoints
+  device: cpu
+  num_workers: 0
 
 paths:
   dem_raw: data/raw/srtm_nepal.tif
