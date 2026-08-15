@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+from contextlib import ExitStack
 import math
 import zipfile
 from datetime import date, datetime
@@ -168,8 +169,26 @@ def raw_paths(input_dir: Path, yyyymm: str) -> dict[str, Path]:
 
 
 def open_dataset(xr, path: Path):
-    # Let xarray choose netcdf4/h5netcdf/scipy based on installed backends.
-    return xr.open_dataset(path)
+    return xr.open_dataset(path, engine="netcdf4")
+
+
+def _single_level_paths(path: Path) -> dict[str, Path]:
+    if not zipfile.is_zipfile(path):
+        return {"instant": path, "accum": path}
+
+    extract_dir = path.parent / f".{path.stem}_unzipped"
+    extract_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path) as archive:
+        names = archive.namelist()
+        for name in names:
+            target = extract_dir / Path(name).name
+            if not target.exists() or target.stat().st_size == 0:
+                archive.extract(name, extract_dir)
+        instant = next((extract_dir / Path(name).name for name in names if "stepType-instant" in name), None)
+        accum = next((extract_dir / Path(name).name for name in names if "stepType-accum" in name), None)
+    if instant is None or accum is None:
+        raise ValueError(f"{path} is zipped but missing expected instant/accum NetCDF members")
+    return {"instant": instant, "accum": accum}
 
 
 def coord_name(ds, candidates: list[str]) -> str:
@@ -299,14 +318,17 @@ def preprocess_month(xr, graph: dict, input_dir: Path, output_dir: Path, yyyymm:
     lon = pos[:, 1]
     node_count = pos.shape[0]
 
-    with open_dataset(xr, paths["single"]) as single, open_dataset(xr, paths["q850"]) as q850, open_dataset(
-        xr, paths["z500"]
-    ) as z500:
+    single_paths = _single_level_paths(paths["single"])
+    with ExitStack() as stack:
+        single_instant = stack.enter_context(open_dataset(xr, single_paths["instant"]))
+        single_accum = stack.enter_context(open_dataset(xr, single_paths["accum"]))
+        q850 = stack.enter_context(open_dataset(xr, paths["q850"]))
+        z500 = stack.enter_context(open_dataset(xr, paths["z500"]))
         raw_arrays = {
-            "t2m": single[variable_name(single, "t2m")],
-            "u10": single[variable_name(single, "u10")],
-            "v10": single[variable_name(single, "v10")],
-            "tp": single[variable_name(single, "tp")],
+            "t2m": single_instant[variable_name(single_instant, "t2m")],
+            "u10": single_instant[variable_name(single_instant, "u10")],
+            "v10": single_instant[variable_name(single_instant, "v10")],
+            "tp": single_accum[variable_name(single_accum, "tp")],
             "q850": q850[variable_name(q850, "q850")],
             "z500": z500[variable_name(z500, "z500")],
         }
