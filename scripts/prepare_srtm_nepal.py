@@ -13,12 +13,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 
-LAT_MIN = 26
-LAT_MAX = 31
-LON_MIN = 80
-LON_MAX = 89
 SAMPLES_PER_TILE = 3601
 SAMPLES_PER_DEGREE = 3600
 NODATA = -32768
@@ -30,6 +27,17 @@ TILE_DIR = RAW_DIR / "srtm_tiles"
 MOSAIC_DAT = RAW_DIR / "srtm_nepal_int16.dat"
 MOSAIC_TIF = RAW_DIR / "srtm_nepal.tif"
 MANIFEST = RAW_DIR / "srtm_nepal_manifest.json"
+
+
+def load_region_bounds() -> tuple[int, int, int, int]:
+    with (ROOT / "configs" / "default.yaml").open("r", encoding="utf-8") as handle:
+        config = yaml.safe_load(handle)
+    region = config["region"]
+    lat_min = int(region["lat_min"])
+    lat_max = int(region["lat_max"])
+    lon_min = int(region["lon_min"])
+    lon_max = int(region["lon_max"])
+    return lat_min, lat_max, lon_min, lon_max
 
 
 def tile_name(lat: int, lon: int) -> str:
@@ -87,14 +95,15 @@ def read_hgt_gz(path: Path) -> np.ndarray:
 
 
 def write_manifest(tiles: list[dict[str, str]]) -> None:
+    lat_min, lat_max, lon_min, lon_max = load_region_bounds()
     payload = {
         "source": "Mapzen/AWS public elevation-tiles-prod Skadi SRTM HGT tiles",
         "source_base_url": BASE_URL,
         "created_for_bounds": {
-            "lat_min": LAT_MIN,
-            "lat_max": LAT_MAX,
-            "lon_min": LON_MIN,
-            "lon_max": LON_MAX,
+            "lat_min": lat_min,
+            "lat_max": lat_max,
+            "lon_min": lon_min,
+            "lon_max": lon_max,
             "crs": "EPSG:4326",
         },
         "resolution_degrees": 1 / SAMPLES_PER_DEGREE,
@@ -105,18 +114,19 @@ def write_manifest(tiles: list[dict[str, str]]) -> None:
 
 
 def build_mosaic(tile_paths: dict[tuple[int, int], Path]) -> tuple[int, int]:
-    rows = (LAT_MAX - LAT_MIN) * SAMPLES_PER_DEGREE + 1
-    cols = (LON_MAX - LON_MIN) * SAMPLES_PER_DEGREE + 1
+    lat_min, lat_max, lon_min, lon_max = load_region_bounds()
+    rows = (lat_max - lat_min) * SAMPLES_PER_DEGREE + 1
+    cols = (lon_max - lon_min) * SAMPLES_PER_DEGREE + 1
     mosaic = np.memmap(MOSAIC_DAT, dtype=np.int16, mode="w+", shape=(rows, cols))
     mosaic[:] = NODATA
 
-    for lat in range(LAT_MAX - 1, LAT_MIN - 1, -1):
-        for lon in range(LON_MIN, LON_MAX):
+    for lat in range(lat_max - 1, lat_min - 1, -1):
+        for lon in range(lon_min, lon_max):
             name = tile_name(lat, lon)
             print(f"Mosaicking {name}", flush=True)
             tile = read_hgt_gz(tile_paths[(lat, lon)]).astype(np.int16, copy=False)
-            row = (LAT_MAX - (lat + 1)) * SAMPLES_PER_DEGREE
-            col = (lon - LON_MIN) * SAMPLES_PER_DEGREE
+            row = (lat_max - (lat + 1)) * SAMPLES_PER_DEGREE
+            col = (lon - lon_min) * SAMPLES_PER_DEGREE
             mosaic[row : row + SAMPLES_PER_TILE, col : col + SAMPLES_PER_TILE] = tile
 
     mosaic.flush()
@@ -131,6 +141,7 @@ def pack_ifd_entry(tag: int, type_id: int, count: int, value: int | bytes, endia
 
 
 def write_geotiff(rows: int, cols: int) -> None:
+    lat_min, lat_max, lon_min, _ = load_region_bounds()
     endian = "<"
     rows_per_strip = 64
     strip_rows = [min(rows_per_strip, rows - start) for start in range(0, rows, rows_per_strip)]
@@ -163,7 +174,7 @@ def write_geotiff(rows: int, cols: int) -> None:
         dtype="<u2",
     ).tobytes()
     pixel_scale = struct.pack(endian + "ddd", 1 / SAMPLES_PER_DEGREE, 1 / SAMPLES_PER_DEGREE, 0.0)
-    tiepoint = struct.pack(endian + "dddddd", 0.0, 0.0, 0.0, float(LON_MIN), float(LAT_MAX), 0.0)
+    tiepoint = struct.pack(endian + "dddddd", 0.0, 0.0, 0.0, float(lon_min), float(lat_max), 0.0)
     nodata = f"{NODATA}\x00".encode("ascii")
     strip_offsets_placeholder = b"\x00" * (strip_count * 4)
     strip_byte_counts_raw = struct.pack(endian + f"{strip_count}I", *strip_byte_counts)
@@ -243,11 +254,12 @@ def write_geotiff(rows: int, cols: int) -> None:
 def main() -> None:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     TILE_DIR.mkdir(parents=True, exist_ok=True)
+    lat_min, lat_max, lon_min, lon_max = load_region_bounds()
 
     tile_records: list[dict[str, str]] = []
     tile_paths: dict[tuple[int, int], Path] = {}
-    for lat in range(LAT_MIN, LAT_MAX):
-        for lon in range(LON_MIN, LON_MAX):
+    for lat in range(lat_min, lat_max):
+        for lon in range(lon_min, lon_max):
             name = tile_name(lat, lon)
             url = tile_url(name)
             dest = TILE_DIR / f"{name}.hgt.gz"
