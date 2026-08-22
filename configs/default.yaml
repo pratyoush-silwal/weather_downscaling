@@ -134,16 +134,15 @@ era5land:
   start_date: 1990-01-01
   end_date: 2022-12-31
   output_dir: data/raw/era5land
+  precipitation_output_dir: data/raw/era5land_precip
   processed_output_dir: data/processed/targets_era5land
   format: netcdf
   variables:
     - 2m_temperature
     - 10m_u_component_of_wind
     - 10m_v_component_of_wind
-
-mswep:
-  input_dir: data/raw/mswep
-  processed_output_dir: data/processed/targets_mswep
+  precipitation_variable:
+    - total_precipitation
 
 targets:
   output_dir: data/processed/targets

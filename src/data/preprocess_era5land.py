@@ -29,9 +29,10 @@ from src.data.preprocess_era5 import (
 )
 
 
-TARGET_NAMES = ["t2m_target", "u10m_target", "v10m_target"]
+TARGET_NAMES = ["t2m_target", "precipitation_target", "u10m_target", "v10m_target"]
 VARIABLE_CANDIDATES = {
     "t2m": ["t2m", "2t", "2m_temperature"],
+    "tp": ["tp", "total_precipitation"],
     "u10": ["u10", "10u", "10m_u_component_of_wind"],
     "v10": ["v10", "10v", "10m_v_component_of_wind"],
 }
@@ -42,6 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--graph", default=None)
     parser.add_argument("--input-dir", default=None)
+    parser.add_argument("--precip-input-dir", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--start-date", default=None)
     parser.add_argument("--end-date", default=None)
@@ -62,8 +64,28 @@ def variable_name(ds, logical_name: str) -> str:
     raise ValueError(f"Missing ERA5-Land variable {logical_name}; available={list(ds.data_vars)}")
 
 
-def preprocess_month(xr, graph: dict, input_dir: Path, output_dir: Path, yyyymm: str, method: str, overwrite: bool) -> bool:
+def _timestamps(ds) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(pd.to_datetime(ds[time_name(ds)].values)).sort_values()
+
+
+def _load_interp(xr, ds, logical_name: str, lat: np.ndarray, lon: np.ndarray, method: str):
+    timestamps = _timestamps(ds)
+    data = interpolate_to_nodes(xr, select_times(ds[variable_name(ds, logical_name)], timestamps), lat, lon, method).values
+    return timestamps, data
+
+
+def preprocess_month(
+    xr,
+    graph: dict,
+    input_dir: Path,
+    precip_input_dir: Path,
+    output_dir: Path,
+    yyyymm: str,
+    method: str,
+    overwrite: bool,
+) -> bool:
     input_path = input_dir / f"era5land_{yyyymm}.nc"
+    precip_path = precip_input_dir / f"era5land_precip_{yyyymm}.nc"
     output_path = output_dir / f"era5land_targets_{yyyymm}.pt"
     if valid_torch_archive(output_path) and not overwrite:
         print(f"Skipping existing {output_path}")
@@ -76,19 +98,27 @@ def preprocess_month(xr, graph: dict, input_dir: Path, output_dir: Path, yyyymm:
     lat = pos[:, 0]
     lon = pos[:, 1]
     with open_dataset(xr, input_path) as ds:
-        arrays = {
-            "t2m": ds[variable_name(ds, "t2m")],
-            "u10": ds[variable_name(ds, "u10")],
-            "v10": ds[variable_name(ds, "v10")],
-        }
-        timestamps = pd.DatetimeIndex(pd.to_datetime(ds[time_name(ds)].values)).sort_values()
-        interpolated = {
-            name: interpolate_to_nodes(xr, select_times(da, timestamps), lat, lon, method).values
-            for name, da in arrays.items()
-        }
+        timestamps, t2m = _load_interp(xr, ds, "t2m", lat, lon, method)
+        _, u10 = _load_interp(xr, ds, "u10", lat, lon, method)
+        _, v10 = _load_interp(xr, ds, "v10", lat, lon, method)
+        if any(name in ds.data_vars for name in VARIABLE_CANDIDATES["tp"]):
+            precip_times, tp = _load_interp(xr, ds, "tp", lat, lon, method)
+        elif precip_path.exists():
+            with open_dataset(xr, precip_path) as precip_ds:
+                precip_times, tp = _load_interp(xr, precip_ds, "tp", lat, lon, method)
+        else:
+            raise FileNotFoundError(f"Missing precipitation for {yyyymm}: neither {input_path} nor {precip_path} has it")
+
+    common = timestamps.intersection(precip_times)
+    if common.empty:
+        raise ValueError(f"No common timestamps for {yyyymm} between {input_path} and precipitation data")
+    time_index = pd.Index(timestamps)
+    precip_index = pd.Index(precip_times)
+    base_idx = time_index.get_indexer(common)
+    tp_idx = precip_index.get_indexer(common)
 
     y = np.stack(
-        [interpolated["t2m"], interpolated["u10"], interpolated["v10"]],
+        [t2m[base_idx], tp[tp_idx], u10[base_idx], v10[base_idx]],
         axis=-1,
     ).astype(np.float32)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -96,9 +126,14 @@ def preprocess_month(xr, graph: dict, input_dir: Path, output_dir: Path, yyyymm:
     torch.save(
         {
             "y": torch.from_numpy(y),
-            "timestamps": [str(value) for value in timestamps],
+            "timestamps": [str(value) for value in common],
             "target_names": TARGET_NAMES,
-            "metadata": {"month": yyyymm, "source_file": str(input_path), "interpolation": method},
+            "metadata": {
+                "month": yyyymm,
+                "source_file": str(input_path),
+                "precipitation_file": str(precip_path if precip_path.exists() else input_path),
+                "interpolation": method,
+            },
         },
         tmp_path,
     )
@@ -114,6 +149,7 @@ def main() -> None:
     graph = load_graph(resolve_path(args.graph or config["paths"]["graph_output"]))
     cfg = config["era5land"]
     input_dir = resolve_path(args.input_dir or cfg["output_dir"])
+    precip_input_dir = resolve_path(args.precip_input_dir or cfg["precipitation_output_dir"])
     output_dir = resolve_path(args.output_dir or cfg["processed_output_dir"])
     months = args.months or month_range(
         parse_date(args.start_date or cfg["start_date"]),
@@ -125,7 +161,18 @@ def main() -> None:
         year = int(yyyymm[:4])
         month = int(yyyymm[4:])
         calendar.monthrange(year, month)
-        written += int(preprocess_month(xr, graph, input_dir, output_dir, yyyymm, args.method, args.overwrite))
+        written += int(
+            preprocess_month(
+                xr,
+                graph,
+                input_dir,
+                precip_input_dir,
+                output_dir,
+                yyyymm,
+                args.method,
+                args.overwrite,
+            )
+        )
     print(f"Processed {written} month(s)")
 
 

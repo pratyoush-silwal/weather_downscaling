@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Merge ERA5-Land and MSWEP monthly targets into final 4-channel tensors."""
+"""Repack preprocessed ERA5-Land targets into final monthly tensors."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import re
 import zipfile
 from pathlib import Path
 
-import pandas as pd
 import torch
 import yaml
 
@@ -25,7 +24,6 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build final monthly target tensors.")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--era5land-dir", default=None)
-    parser.add_argument("--mswep-dir", default=None)
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
@@ -61,39 +59,24 @@ def _load_torch(path: Path) -> dict:
         return torch.load(path, map_location="cpu")
 
 
-def build_month(era5land_path: Path, mswep_path: Path, output_path: Path, overwrite: bool) -> bool:
+def build_month(era5land_path: Path, output_path: Path, overwrite: bool) -> bool:
     if valid_torch_archive(output_path) and not overwrite:
         print(f"Skipping existing {output_path}")
         return False
     era5land = _load_torch(era5land_path)
-    mswep = _load_torch(mswep_path)
-
-    era_times = pd.Index(era5land["timestamps"])
-    mswep_times = pd.Index(mswep["timestamps"])
-    common = era_times.intersection(mswep_times)
-    if common.empty:
-        print(f"Skipping {output_path.stem}; no common timestamps")
-        return False
-
-    era_idx = era_times.get_indexer(common)
-    mswep_idx = mswep_times.get_indexer(common)
-
-    era_y = era5land["y"][era_idx].float()
-    precip = mswep["y"][mswep_idx].float()
-    if precip.ndim == 2:
-        precip = precip.unsqueeze(-1)
-    y = torch.cat([era_y[:, :, 0:1], precip, era_y[:, :, 1:2], era_y[:, :, 2:3]], dim=-1)
+    y = era5land["y"].float()
+    if y.shape[-1] != 4:
+        raise ValueError(f"{era5land_path} expected 4 ERA5-Land target channels, got {y.shape[-1]}")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".part")
     torch.save(
         {
             "y": y,
-            "timestamps": list(common),
+            "timestamps": list(era5land["timestamps"]),
             "target_names": FINAL_TARGET_NAMES,
             "metadata": {
                 "era5land_file": str(era5land_path),
-                "mswep_file": str(mswep_path),
                 "month": month_from_path(output_path),
             },
         },
@@ -108,17 +91,15 @@ def main() -> None:
     args = parse_args()
     config = load_config(args.config)
     era5land_dir = resolve_path(args.era5land_dir or config["era5land"]["processed_output_dir"])
-    mswep_dir = resolve_path(args.mswep_dir or config["mswep"]["processed_output_dir"])
     output_dir = resolve_path(args.output_dir or config["targets"]["output_dir"])
 
     era5land_files = {month_from_path(path): path for path in sorted(era5land_dir.glob("*.pt")) if month_from_path(path)}
-    mswep_files = {month_from_path(path): path for path in sorted(mswep_dir.glob("*.pt")) if month_from_path(path)}
-    months = sorted(set(era5land_files) & set(mswep_files))
+    months = sorted(era5land_files)
 
     written = 0
     for month in months:
         output_path = output_dir / f"targets_{month}.pt"
-        written += int(build_month(era5land_files[month], mswep_files[month], output_path, args.overwrite))
+        written += int(build_month(era5land_files[month], output_path, args.overwrite))
     print(f"Processed {written} month(s)")
 
 
