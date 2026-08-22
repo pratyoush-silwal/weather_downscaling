@@ -7,3 +7,4 @@ PyYAML
 scipy
 torch
 xarray
+xgboost
