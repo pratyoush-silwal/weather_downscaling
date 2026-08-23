@@ -21,6 +21,7 @@ from src.training.metrics import summarize_metrics
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the PI-GNN on processed monthly tensors.")
     parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--graph", default=None)
     parser.add_argument("--dynamic-dir", default=None)
     parser.add_argument("--target-dir", default=None)
     parser.add_argument("--checkpoint-dir", default=None)
@@ -108,7 +109,7 @@ def evaluate_epoch(model, loader, loss_fn, device: torch.device) -> tuple[float,
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    graph_path = resolve_path(config["paths"]["graph_output"])
+    graph_path = resolve_path(args.graph or config["paths"]["graph_output"])
     dynamic_dir = resolve_path(args.dynamic_dir or config["era5"]["processed_output_dir"])
     target_dir = resolve_path(args.target_dir or config["targets"]["output_dir"])
     checkpoint_dir = resolve_path(args.checkpoint_dir or config["training"]["checkpoint_dir"])

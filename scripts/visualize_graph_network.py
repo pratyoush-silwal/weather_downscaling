@@ -16,15 +16,26 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import yaml
 from matplotlib.collections import LineCollection
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Visualize a saved torch graph package.")
     parser.add_argument(
+        "--config",
+        default="configs/default.yaml",
+        help="Project config used to resolve the default boundary shapefile.",
+    )
+    parser.add_argument(
         "--graph",
         default="data/processed/nepal_graph.pt",
         help="Input graph package created by src/data/build_graph.py.",
+    )
+    parser.add_argument(
+        "--boundary",
+        default=None,
+        help="Optional boundary shapefile. Defaults to region.shapefile_path from config or graph metadata.",
     )
     parser.add_argument(
         "--output",
@@ -112,6 +123,50 @@ def load_graph(path: Path) -> dict:
     return graph
 
 
+def load_config(path: Path) -> dict:
+    with path.open("r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle)
+
+
+def load_boundary(shapefile_path: Path):
+    try:
+        import shapefile as pyshp
+        from shapely.geometry import shape
+        from shapely.ops import unary_union
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "visualize_graph_network.py needs `pip install pyshp shapely` to draw the boundary shapefile."
+        ) from exc
+
+    reader = pyshp.Reader(str(shapefile_path))
+    return unary_union([shape(record.__geo_interface__) for record in reader.shapes()])
+
+
+def boundary_rings(boundary) -> list[tuple[np.ndarray, np.ndarray]]:
+    polygons = list(boundary.geoms) if hasattr(boundary, "geoms") else [boundary]
+    rings: list[tuple[np.ndarray, np.ndarray]] = []
+    for polygon in polygons:
+        if polygon.geom_type != "Polygon":
+            continue
+        ring_objects = [polygon.exterior, *polygon.interiors]
+        for ring in ring_objects:
+            xs, ys = ring.xy
+            rings.append((np.asarray(xs), np.asarray(ys)))
+    return rings
+
+
+def boundary_path(args: argparse.Namespace, graph: dict) -> Path | None:
+    if args.boundary:
+        return resolve_path(args.boundary)
+    metadata = graph.get("metadata", {})
+    shapefile_path = metadata.get("shapefile_path")
+    if shapefile_path:
+        return resolve_path(shapefile_path)
+    config = load_config(resolve_path(args.config))
+    candidate = config.get("region", {}).get("shapefile_path")
+    return resolve_path(candidate) if candidate else None
+
+
 def edge_sample(edge_index: np.ndarray, max_edges: int) -> np.ndarray:
     edge_count = edge_index.shape[1]
     if max_edges <= 0 or edge_count <= max_edges:
@@ -168,6 +223,8 @@ def draw_graph(args: argparse.Namespace) -> Path:
     lon = pos[:, 1]
     sampled_edges = edge_sample(edge_index, args.max_edges)
     values, colorbar_label, cmap = node_values(graph, args.color_by, edge_index)
+    boundary_file = boundary_path(args, graph)
+    boundary = load_boundary(boundary_file) if boundary_file and boundary_file.exists() else None
 
     segments = np.stack(
         [
@@ -178,6 +235,9 @@ def draw_graph(args: argparse.Namespace) -> Path:
     )
 
     fig, ax = plt.subplots(figsize=parse_figsize(args.figsize), constrained_layout=True)
+    if boundary is not None:
+        for xs, ys in boundary_rings(boundary):
+            ax.plot(xs, ys, color="black", linewidth=2.2, zorder=3)
     ax.add_collection(
         LineCollection(
             segments,
@@ -200,18 +260,28 @@ def draw_graph(args: argparse.Namespace) -> Path:
 
     metadata = graph.get("metadata", {})
     region_name = metadata.get("region", {}).get("name", "graph")
+    clip_buffer_deg = metadata.get("clip_buffer_deg", metadata.get("region", {}).get("clip_buffer_deg", 0.0))
+    in_region_mask = graph.get("in_region_mask")
+    strict_count = int(as_numpy(in_region_mask).sum()) if in_region_mask is not None else pos.shape[0]
+    halo_count = int(pos.shape[0] - strict_count)
     title = (
         f"{region_name.title()} graph network "
-        f"({pos.shape[0]:,} nodes, {edge_index.shape[1]:,} edges; "
+        f"({pos.shape[0]:,} nodes = {strict_count:,} inside + {halo_count:,} halo, "
+        f"buffer={clip_buffer_deg}; {edge_index.shape[1]:,} edges; "
         f"showing {sampled_edges.shape[1]:,} edges)"
     )
     ax.set_title(title)
     ax.set_xlabel("Longitude")
     ax.set_ylabel("Latitude")
-    ax.set_aspect("equal", adjustable="box")
+    ax.set_aspect(1.0 / np.cos(np.radians(float(lat.mean()))), adjustable="box")
     ax.grid(True, color="#e5e7eb", linewidth=0.5, alpha=0.8)
     colorbar = fig.colorbar(scatter, ax=ax, shrink=0.82, pad=0.02)
     colorbar.set_label(colorbar_label)
+
+    x_pad = max(0.05, (lon.max() - lon.min()) * 0.03)
+    y_pad = max(0.05, (lat.max() - lat.min()) * 0.03)
+    ax.set_xlim(float(lon.min() - x_pad), float(lon.max() + x_pad))
+    ax.set_ylim(float(lat.min() - y_pad), float(lat.max() + y_pad))
 
     fig.savefig(output_path, dpi=args.dpi)
     if args.show:

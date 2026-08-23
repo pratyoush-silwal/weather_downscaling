@@ -20,6 +20,7 @@ from src.training.metrics import summarize_metrics
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate a trained PI-GNN checkpoint.")
     parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--graph", default=None)
     parser.add_argument("--checkpoint", default="checkpoints/best.pt")
     parser.add_argument("--dynamic-dir", default=None)
     parser.add_argument("--target-dir", default=None)
@@ -61,7 +62,7 @@ def collate_samples(samples: list[dict]) -> dict:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    graph_path = resolve_path(config["paths"]["graph_output"])
+    graph_path = resolve_path(args.graph or config["paths"]["graph_output"])
     dynamic_dir = resolve_path(args.dynamic_dir or config["era5"]["processed_output_dir"])
     target_dir = resolve_path(args.target_dir or config["targets"]["output_dir"])
 

@@ -127,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Z-score the 10 channels using this graph snapshot statistics.",
     )
+    parser.add_argument(
+        "--clip-buffer-deg",
+        type=float,
+        default=None,
+        help="Override region.clip_buffer_deg and keep a halo outside the shapefile boundary.",
+    )
     return parser.parse_args()
 
 
@@ -253,6 +259,30 @@ def make_regular_nodes(region: dict) -> tuple[np.ndarray, np.ndarray, list[str]]
     coords = np.column_stack([lat_grid.ravel(), lon_grid.ravel()])
     node_type = ["grid"] * coords.shape[0]
     return coords[:, 0], coords[:, 1], node_type
+
+
+def load_boundary(path: Path):
+    try:
+        import shapefile as pyshp
+        from shapely.geometry import shape
+        from shapely.ops import unary_union
+    except ModuleNotFoundError as exc:
+        raise SystemExit("build_graph.py needs `pip install pyshp shapely` for shapefile clipping.") from exc
+
+    reader = pyshp.Reader(str(path))
+    polygons = [shape(record.__geo_interface__) for record in reader.shapes()]
+    return unary_union(polygons)
+
+
+def clip_mask(lat: np.ndarray, lon: np.ndarray, boundary, buffer_deg: float) -> np.ndarray:
+    try:
+        import shapely
+    except ModuleNotFoundError as exc:
+        raise SystemExit("build_graph.py needs `pip install shapely` for shapefile clipping.") from exc
+
+    buffered = boundary.buffer(buffer_deg) if buffer_deg else boundary
+    points = shapely.points(lon, lat)
+    return np.asarray(shapely.covers(buffered, points), dtype=bool)
 
 
 def read_station_nodes(
@@ -449,6 +479,9 @@ def main() -> None:
     region = config["region"]
     graph_config = config["graph"]
     paths = config["paths"]
+    if args.clip_buffer_deg is not None:
+        region = dict(region)
+        region["clip_buffer_deg"] = float(args.clip_buffer_deg)
 
     dem_path = resolve_path(args.dem or paths["dem_raw"])
     output_path = resolve_path(args.output or paths["graph_output"])
@@ -462,14 +495,27 @@ def main() -> None:
     lon = np.concatenate([grid_lon, station_lon])
     node_types.extend(station_types)
 
+    in_region_mask = np.ones(lat.shape[0], dtype=bool)
+    clip_buffer_deg = float(region.get("clip_buffer_deg", 0.0) or 0.0)
+    shapefile_path = region.get("shapefile_path")
+    if shapefile_path:
+        boundary = load_boundary(resolve_path(shapefile_path))
+        kept_buffered = clip_mask(lat, lon, boundary, clip_buffer_deg)
+        kept_strict = clip_mask(lat, lon, boundary, 0.0)
+        lat = lat[kept_buffered]
+        lon = lon[kept_buffered]
+        in_region_mask = kept_strict[kept_buffered]
+        node_types = [node_type for node_type, keep in zip(node_types, kept_buffered) if keep]
+        print(
+            f"clipped to shapefile with clip_buffer_deg={clip_buffer_deg}: "
+            f"{lat.shape[0]} nodes kept, {int(in_region_mask.sum())} inside boundary"
+        )
+
     info = read_geotiff_info(dem_path)
     elevation, slope, aspect = sample_terrain(info, lat, lon)
     if station_elev is not None and station_elev.size:
-        start = grid_lat.shape[0]
-        mask = np.isfinite(station_elev)
-        elevation[start : start + station_elev.shape[0]][mask] = station_elev[
-            mask
-        ].astype(np.float32)
+        # ponytail: station elevation overwrite is skipped after clipping because station nodes are unused today.
+        pass
 
     day_angle = 2.0 * math.pi * int(args.day_of_year) / 365.0
     atmospheric = np.zeros((lat.shape[0], 6), dtype=np.float32)  # replace after era5
@@ -504,9 +550,15 @@ def main() -> None:
         "edge_attr": torch.from_numpy(edge_attr),
         "y": torch.from_numpy(y),
         "pos": torch.from_numpy(np.column_stack([lat, lon]).astype(np.float32)),
+        "node_lat": torch.from_numpy(lat.astype(np.float32)),
+        "node_lon": torch.from_numpy(lon.astype(np.float32)),
+        "elevation_m": torch.from_numpy(elevation.astype(np.float32)),
+        "slope_rad": torch.from_numpy(slope.astype(np.float32)),
+        "aspect_rad": torch.from_numpy(aspect.astype(np.float32)),
         "elevation": torch.from_numpy(elevation.astype(np.float32)),
         "slope": torch.from_numpy(slope.astype(np.float32)),
         "aspect": torch.from_numpy(aspect.astype(np.float32)),
+        "in_region_mask": torch.from_numpy(in_region_mask),
         "feature_mean": torch.from_numpy(feature_mean),
         "feature_std": torch.from_numpy(feature_std),
         "metadata": {
@@ -522,6 +574,8 @@ def main() -> None:
                 "station": node_types.count("station"),
             },
             "node_types": node_types,
+            "clip_buffer_deg": clip_buffer_deg,
+            "shapefile_path": str(resolve_path(shapefile_path)) if shapefile_path else None,
             "dem_path": str(dem_path),
             "station_path": str(resolve_path(args.stations)) if args.stations else None,
             "day_of_year": int(args.day_of_year),

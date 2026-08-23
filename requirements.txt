@@ -3,6 +3,8 @@ matplotlib
 netCDF4
 numpy
 pandas
+pyshp
+Shapely
 PyYAML
 scipy
 torch

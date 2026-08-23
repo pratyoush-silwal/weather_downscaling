@@ -7,6 +7,8 @@ region:
   lon_min: 80.0
   lon_max: 89.0
   resolution_deg: 0.05
+  shapefile_path: data/raw/hkh_boundary.shp
+  clip_buffer_deg: 0.0
 
 era5:
   start_date: 1990-01-01
@@ -202,6 +204,7 @@ training:
   gradient_clip_norm: 1.0
   validation_months: 12
   checkpoint_dir: checkpoints
+  experiments_root: data/processed/buffer_experiments
   device: cpu
   num_workers: 0
 
