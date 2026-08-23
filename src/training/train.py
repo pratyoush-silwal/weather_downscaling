@@ -108,6 +108,7 @@ def collate_samples(samples: list[dict]) -> dict:
     batch = {
         "x": torch.stack([sample["x"] for sample in samples], dim=0),
         "pos": first["pos"],
+        "in_region_mask": first["in_region_mask"],
         "edge_index": first["edge_index"],
         "edge_attr": first["edge_attr"],
         "timestamp": [sample["timestamp"] for sample in samples],
@@ -139,7 +140,15 @@ def evaluate_epoch(model, loader, loss_fn, device: torch.device) -> tuple[float,
             loss_total += float(losses["total"])
             pred_batches.append(prediction.cpu())
             target_batches.append(y.cpu())
-    metrics = summarize_metrics(torch.cat(pred_batches, dim=0), torch.cat(target_batches, dim=0)) if pred_batches else {}
+    metrics = (
+        summarize_metrics(
+            torch.cat(pred_batches, dim=0),
+            torch.cat(target_batches, dim=0),
+            node_mask=loader.dataset.in_region_mask,
+        )
+        if pred_batches
+        else {}
+    )
     mean_loss = loss_total / max(len(loader), 1)
     return mean_loss, metrics
 

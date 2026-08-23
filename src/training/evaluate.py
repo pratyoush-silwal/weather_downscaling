@@ -55,6 +55,7 @@ def collate_samples(samples: list[dict]) -> dict:
         "x": torch.stack([sample["x"] for sample in samples], dim=0),
         "y": torch.stack([sample["y"] for sample in samples], dim=0),
         "pos": first["pos"],
+        "in_region_mask": first["in_region_mask"],
         "edge_index": first["edge_index"],
         "edge_attr": first["edge_attr"],
         "timestamp": [sample["timestamp"] for sample in samples],
@@ -110,7 +111,11 @@ def main() -> None:
             predictions.append(prediction.cpu())
             targets_out.append(batch["y"].cpu())
 
-    metrics = summarize_metrics(torch.cat(predictions, dim=0), torch.cat(targets_out, dim=0))
+    metrics = summarize_metrics(
+        torch.cat(predictions, dim=0),
+        torch.cat(targets_out, dim=0),
+        node_mask=dataset.in_region_mask,
+    )
     print(metrics)
 
 

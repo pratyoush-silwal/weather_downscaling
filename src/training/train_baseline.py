@@ -65,7 +65,7 @@ def evaluate_model(model: nn.Module, dataset: WeatherGraphDataset, device: torch
             x = batch["x"].to(device)
             preds.append(model(x).cpu())
             targets.append(batch["y"].cpu())
-    return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0))
+    return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0), node_mask=dataset.in_region_mask)
 
 
 def evaluate_xgboost_model(model, dataset: WeatherGraphDataset) -> dict[str, float]:
@@ -78,7 +78,7 @@ def evaluate_xgboost_model(model, dataset: WeatherGraphDataset) -> dict[str, flo
         pred = torch.from_numpy(model.predict(x)).reshape_as(y)
         preds.append(pred)
         targets.append(y)
-    return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0))
+    return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0), node_mask=dataset.in_region_mask)
 
 
 def interpolation_predict(x: torch.Tensor, coarse_indices: list[int]) -> torch.Tensor:

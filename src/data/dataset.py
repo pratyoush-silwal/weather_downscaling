@@ -93,6 +93,7 @@ class WeatherGraphDataset(Dataset):
         self.edge_index = self.graph["edge_index"].long()
         self.edge_attr = self.graph["edge_attr"].float()
         self.pos = self.graph["pos"].float()
+        self.in_region_mask = self.graph.get("in_region_mask", torch.ones(self.pos.shape[0], dtype=torch.bool)).bool()
 
         if isinstance(dynamic_paths, (str, Path)):
             path = Path(dynamic_paths)
@@ -177,6 +178,7 @@ class WeatherGraphDataset(Dataset):
             "edge_index": self.edge_index,
             "edge_attr": self.edge_attr,
             "pos": self.pos,
+            "in_region_mask": self.in_region_mask,
             "time_index": torch.tensor(index, dtype=torch.long),
             "timestamp": dynamic["timestamps"][local_index],
             "feature_names": FULL_FEATURE_NAMES,

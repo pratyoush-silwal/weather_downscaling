@@ -60,28 +60,46 @@ def month_from_path(path: Path) -> str:
     return path.stem.rsplit("_", 1)[-1]
 
 
-def _finite_pair(y_true: torch.Tensor, y_pred: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _expanded_node_mask(node_mask: torch.Tensor | None, y_true: torch.Tensor) -> torch.Tensor | None:
+    if node_mask is None:
+        return None
+    node_mask = node_mask.to(dtype=torch.bool)
+    if node_mask.ndim == y_true.ndim - 2:
+        while node_mask.ndim < y_true.ndim - 1:
+            node_mask = node_mask.unsqueeze(0)
+        return node_mask.unsqueeze(-1).expand_as(y_true)
+    if node_mask.ndim == y_true.ndim - 1:
+        return node_mask.unsqueeze(-1).expand_as(y_true)
+    if node_mask.ndim == y_true.ndim and node_mask.shape == y_true.shape:
+        return node_mask
+    raise ValueError(f"node_mask shape {tuple(node_mask.shape)} is incompatible with target shape {tuple(y_true.shape)}")
+
+
+def _finite_pair(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     mask = torch.isfinite(y_true) & torch.isfinite(y_pred)
+    region_mask = _expanded_node_mask(node_mask, y_true)
+    if region_mask is not None:
+        mask = mask & region_mask
     return y_true[mask], y_pred[mask]
 
 
-def rmse(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    y_true, y_pred = _finite_pair(y_true, y_pred)
+def rmse(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> float:
+    y_true, y_pred = _finite_pair(y_true, y_pred, node_mask=node_mask)
     return torch.sqrt(((y_pred - y_true) ** 2).mean()).item()
 
 
-def mae(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    y_true, y_pred = _finite_pair(y_true, y_pred)
+def mae(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> float:
+    y_true, y_pred = _finite_pair(y_true, y_pred, node_mask=node_mask)
     return (y_pred - y_true).abs().mean().item()
 
 
-def bias(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    y_true, y_pred = _finite_pair(y_true, y_pred)
+def bias(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> float:
+    y_true, y_pred = _finite_pair(y_true, y_pred, node_mask=node_mask)
     return (y_pred - y_true).mean().item()
 
 
-def corr(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    y_true, y_pred = _finite_pair(y_true, y_pred)
+def corr(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> float:
+    y_true, y_pred = _finite_pair(y_true, y_pred, node_mask=node_mask)
     if y_true.numel() < 2:
         return float("nan")
     y_true = y_true - y_true.mean()
@@ -90,19 +108,19 @@ def corr(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
     return ((y_true * y_pred).sum() / denom).item() if denom > 0 else float("nan")
 
 
-def r2(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    y_true, y_pred = _finite_pair(y_true, y_pred)
+def r2(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> float:
+    y_true, y_pred = _finite_pair(y_true, y_pred, node_mask=node_mask)
     ss_res = ((y_true - y_pred) ** 2).sum()
     ss_tot = ((y_true - y_true.mean()) ** 2).sum()
     return (1 - ss_res / ss_tot).item() if ss_tot > 0 else float("nan")
 
 
-def nse(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    return r2(y_true, y_pred)
+def nse(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> float:
+    return r2(y_true, y_pred, node_mask=node_mask)
 
 
-def kge(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
-    y_true, y_pred = _finite_pair(y_true, y_pred)
+def kge(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> float:
+    y_true, y_pred = _finite_pair(y_true, y_pred, node_mask=node_mask)
     r = corr(y_true, y_pred)
     mean_true = y_true.mean().item()
     mean_pred = y_pred.mean().item()
@@ -113,8 +131,8 @@ def kge(y_true: torch.Tensor, y_pred: torch.Tensor) -> float:
     return 1.0 - math.sqrt((r - 1.0) ** 2 + (alpha - 1.0) ** 2 + (beta - 1.0) ** 2)
 
 
-def precip_event_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, threshold: float = EVENT_THRESHOLD) -> dict[str, float]:
-    y_true, y_pred = _finite_pair(y_true, y_pred)
+def precip_event_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, threshold: float = EVENT_THRESHOLD, node_mask: torch.Tensor | None = None) -> dict[str, float]:
+    y_true, y_pred = _finite_pair(y_true, y_pred, node_mask=node_mask)
     truth = y_true >= threshold
     pred = y_pred >= threshold
     tp = (truth & pred).sum().item()
@@ -127,25 +145,26 @@ def precip_event_metrics(y_true: torch.Tensor, y_pred: torch.Tensor, threshold: 
     return {"pod": pod, "far": far, "csi": csi, "frequency_bias": fbias}
 
 
-def metrics_for_channel(y_true: torch.Tensor, y_pred: torch.Tensor, is_precip: bool = False) -> dict[str, float]:
+def metrics_for_channel(y_true: torch.Tensor, y_pred: torch.Tensor, is_precip: bool = False, node_mask: torch.Tensor | None = None) -> dict[str, float]:
     out = {
-        "rmse": rmse(y_true, y_pred),
-        "mae": mae(y_true, y_pred),
-        "bias": bias(y_true, y_pred),
-        "corr": corr(y_true, y_pred),
-        "r2": r2(y_true, y_pred),
-        "nse": nse(y_true, y_pred),
-        "kge": kge(y_true, y_pred),
+        "rmse": rmse(y_true, y_pred, node_mask=node_mask),
+        "mae": mae(y_true, y_pred, node_mask=node_mask),
+        "bias": bias(y_true, y_pred, node_mask=node_mask),
+        "corr": corr(y_true, y_pred, node_mask=node_mask),
+        "r2": r2(y_true, y_pred, node_mask=node_mask),
+        "nse": nse(y_true, y_pred, node_mask=node_mask),
+        "kge": kge(y_true, y_pred, node_mask=node_mask),
     }
     if is_precip:
-        out.update(precip_event_metrics(y_true, y_pred))
+        out.update(precip_event_metrics(y_true, y_pred, node_mask=node_mask))
     return out
 
 
-def summarize_all(y_true: torch.Tensor, y_pred: torch.Tensor) -> pd.DataFrame:
+def summarize_all(y_true: torch.Tensor, y_pred: torch.Tensor, node_mask: torch.Tensor | None = None) -> pd.DataFrame:
     rows = {}
     for idx, name in enumerate(TARGET_NAMES):
-        rows[name] = metrics_for_channel(y_true[..., idx], y_pred[..., idx], is_precip=(name == "precipitation"))
+        channel_mask = node_mask if node_mask is None else node_mask
+        rows[name] = metrics_for_channel(y_true[..., idx], y_pred[..., idx], is_precip=(name == "precipitation"), node_mask=channel_mask)
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
@@ -313,6 +332,7 @@ def main() -> None:
 
     dataset = WeatherGraphDataset(graph_path, [dynamic[m] for m in months], [targets[m] for m in months])
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_samples)
+    region_mask = dataset.in_region_mask
 
     requested_models = ["interpolation", "mlp", "xgboost", "gnn"]
     available_models: list[str] = []
@@ -332,7 +352,7 @@ def main() -> None:
         predictions[model_name] = pred
         if reference_target is None:
             reference_target = y_true
-        table = summarize_all(y_true, pred)
+        table = summarize_all(y_true, pred, node_mask=region_mask)
         metric_tables[model_name] = table
         summary_rows.append(
             {
