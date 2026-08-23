@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
+import csv
+import json
 from pathlib import Path
 import sys
 
@@ -31,6 +34,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
 
@@ -106,14 +110,70 @@ def evaluate_epoch(model, loader, loss_fn, device: torch.device) -> tuple[float,
     return mean_loss, metrics
 
 
+def effective_config(config: dict, args: argparse.Namespace) -> dict:
+    cfg = copy.deepcopy(config)
+    if args.epochs is not None:
+        cfg["training"]["epochs"] = int(args.epochs)
+    if args.batch_size is not None:
+        cfg["training"]["batch_size"] = int(args.batch_size)
+    if args.learning_rate is not None:
+        cfg["training"]["learning_rate"] = float(args.learning_rate)
+    if args.device is not None:
+        cfg["training"]["device"] = args.device
+    return cfg
+
+
+def append_history_row(path: Path, row: dict[str, object]) -> None:
+    fieldnames = list(row)
+    write_header = not path.exists()
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+def write_summary(
+    path: Path,
+    best_epoch: int,
+    best_val: float,
+    best_metrics: dict[str, float],
+    last_epoch: int,
+    train_months: list[str],
+    val_months: list[str],
+    graph_path: Path,
+    dynamic_dir: Path,
+    target_dir: Path,
+) -> None:
+    summary = {
+        "status": "completed",
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val,
+        "best_metrics": best_metrics,
+        "last_epoch": last_epoch,
+        "train_months": train_months,
+        "val_months": val_months,
+        "graph": str(graph_path),
+        "dynamic_dir": str(dynamic_dir),
+        "target_dir": str(target_dir),
+    }
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2)
+
+
 def main() -> None:
     args = parse_args()
-    config = load_config(args.config)
+    base_config = load_config(args.config)
+    config = effective_config(base_config, args)
     graph_path = resolve_path(args.graph or config["paths"]["graph_output"])
     dynamic_dir = resolve_path(args.dynamic_dir or config["era5"]["processed_output_dir"])
     target_dir = resolve_path(args.target_dir or config["targets"]["output_dir"])
     checkpoint_dir = resolve_path(args.checkpoint_dir or config["training"]["checkpoint_dir"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    history_path = checkpoint_dir / "history.csv"
+    metrics_path = checkpoint_dir / "metrics.json"
+    with (checkpoint_dir / "config.yaml").open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(config, handle, sort_keys=False)
 
     month_files = paired_month_files(dynamic_dir, target_dir)
     if not month_files:
@@ -130,7 +190,7 @@ def main() -> None:
     if not train_pairs:
         raise ValueError("No training months selected")
 
-    batch_size = int(args.batch_size or config["training"]["batch_size"])
+    batch_size = int(config["training"]["batch_size"])
     train_loader = make_loader(graph_path, [d for d, _ in train_pairs], [t for _, t in train_pairs], batch_size, True)
     val_loader = (
         make_loader(graph_path, [d for d, _ in val_pairs], [t for _, t in val_pairs], batch_size, False)
@@ -139,11 +199,11 @@ def main() -> None:
     )
 
     model = build_pignn_from_config(config["model"])
-    device = torch.device(args.device or config["training"]["device"])
+    device = torch.device(config["training"]["device"])
     model.to(device)
     optimizer = AdamW(
         model.parameters(),
-        lr=float(args.learning_rate or config["training"]["learning_rate"]),
+        lr=float(config["training"]["learning_rate"]),
         weight_decay=float(config["training"]["weight_decay"]),
     )
     loss_cfg = config["loss"]
@@ -157,9 +217,39 @@ def main() -> None:
         lapse_rate_k_per_m=float(loss_cfg["lapse_rate_k_per_m"]),
     )
 
-    epochs = int(args.epochs or config["training"]["epochs"])
+    epochs = int(config["training"]["epochs"])
+    last_checkpoint_path = checkpoint_dir / "last.pt"
+    start_epoch = 1
     best_val = float("inf")
-    for epoch in range(1, epochs + 1):
+    best_epoch = 0
+    best_metrics: dict[str, float] = {}
+    if args.resume and last_checkpoint_path.exists():
+        checkpoint = torch.load(last_checkpoint_path, map_location="cpu", weights_only=False)
+        model.load_state_dict(checkpoint["model_state"])
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+        start_epoch = int(checkpoint["epoch"]) + 1
+        best_val = float(checkpoint.get("best_val_loss", float("inf")))
+        best_epoch = int(checkpoint.get("best_epoch", 0))
+        best_metrics = dict(checkpoint.get("best_metrics", {}))
+        print(f"resuming from epoch {start_epoch}")
+
+    if start_epoch > epochs:
+        print(f"training already finished at epoch {start_epoch - 1}")
+        write_summary(
+            metrics_path,
+            best_epoch,
+            best_val,
+            best_metrics,
+            start_epoch - 1,
+            train_months,
+            val_months,
+            graph_path,
+            dynamic_dir,
+            target_dir,
+        )
+        return
+
+    for epoch in range(start_epoch, epochs + 1):
         model.train()
         running = 0.0
         for batch in train_loader:
@@ -180,9 +270,19 @@ def main() -> None:
         print(f"epoch {epoch} train_loss={train_loss:.6f}")
 
         val_loss = train_loss
+        metrics: dict[str, float] = {}
         if val_loader is not None:
             val_loss, metrics = evaluate_epoch(model, val_loader, loss_fn, device)
             print(f"epoch {epoch} val_loss={val_loss:.6f} metrics={metrics}")
+
+        history_row: dict[str, object] = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+        }
+        for key, value in metrics.items():
+            history_row[key] = value
+        append_history_row(history_path, history_row)
 
         checkpoint = {
             "epoch": epoch,
@@ -191,11 +291,32 @@ def main() -> None:
             "config": config,
             "train_months": train_months,
             "val_months": val_months,
+            "best_val_loss": best_val,
+            "best_epoch": best_epoch,
+            "best_metrics": best_metrics,
         }
-        torch.save(checkpoint, checkpoint_dir / "last.pt")
         if val_loss <= best_val:
             best_val = val_loss
+            best_epoch = epoch
+            best_metrics = metrics
+            checkpoint["best_val_loss"] = best_val
+            checkpoint["best_epoch"] = best_epoch
+            checkpoint["best_metrics"] = best_metrics
             torch.save(checkpoint, checkpoint_dir / "best.pt")
+        torch.save(checkpoint, checkpoint_dir / "last.pt")
+
+    write_summary(
+        metrics_path,
+        best_epoch,
+        best_val,
+        best_metrics,
+        epochs,
+        train_months,
+        val_months,
+        graph_path,
+        dynamic_dir,
+        target_dir,
+    )
 
 
 if __name__ == "__main__":

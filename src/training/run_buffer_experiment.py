@@ -15,15 +15,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build graph/data for one clip-buffer setting and optionally train.")
     parser.add_argument("--config", default="configs/default.yaml")
     parser.add_argument("--clip-buffer-deg", type=float, required=True)
+    parser.add_argument("--experiment-tag", default=None)
     parser.add_argument("--months", nargs="*", default=None, help="Optional YYYYMM subset for preprocessing.")
     parser.add_argument("--train", action="store_true", help="Run src/training/train.py after preprocessing.")
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--checkpoint-dir", default=None)
     parser.add_argument("--train-months", nargs="*", default=None)
     parser.add_argument("--val-months", nargs="*", default=None)
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch-size", type=int, default=None)
     parser.add_argument("--learning-rate", type=float, default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
 
@@ -58,26 +61,29 @@ def maybe_extend(cmd: list[str], flag: str, values: list[str] | None) -> None:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    tag = buffer_tag(args.clip_buffer_deg)
+    tag = args.experiment_tag or buffer_tag(args.clip_buffer_deg)
     root = resolve_path(config["training"].get("experiments_root", "data/processed/buffer_experiments")) / tag
     graph_path = root / "graph.pt"
     dynamic_dir = root / "era5_dynamic"
     era5land_dir = root / "targets_era5land"
     target_dir = root / "targets"
-    checkpoint_dir = resolve_path(config["training"]["checkpoint_dir"]) / tag
+    checkpoint_dir = resolve_path(args.checkpoint_dir or (resolve_path(config["training"]["checkpoint_dir"]) / tag))
 
-    build_graph_cmd = [
-        sys.executable,
-        "-m",
-        "src.data.build_graph",
-        "--config",
-        args.config,
-        "--clip-buffer-deg",
-        str(args.clip_buffer_deg),
-        "--output",
-        str(graph_path),
-    ]
-    run(build_graph_cmd)
+    if args.overwrite or not graph_path.exists():
+        build_graph_cmd = [
+            sys.executable,
+            "-m",
+            "src.data.build_graph",
+            "--config",
+            args.config,
+            "--clip-buffer-deg",
+            str(args.clip_buffer_deg),
+            "--output",
+            str(graph_path),
+        ]
+        run(build_graph_cmd)
+    else:
+        print(f"Skipping existing {graph_path}")
 
     preprocess_era5_cmd = [
         sys.executable,
@@ -154,6 +160,8 @@ def main() -> None:
         train_cmd.extend(["--learning-rate", str(args.learning_rate)])
     if args.device is not None:
         train_cmd.extend(["--device", str(args.device)])
+    if args.resume:
+        train_cmd.append("--resume")
     run(train_cmd)
 
 
