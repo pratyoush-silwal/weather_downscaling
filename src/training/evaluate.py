@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.data.dataset import WeatherGraphDataset
 from src.models import build_pignn_from_config
 from src.training.metrics import summarize_metrics
+from src.training.train import default_split_months
 
 
 def parse_args() -> argparse.Namespace:
@@ -25,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dynamic-dir", default=None)
     parser.add_argument("--target-dir", default=None)
     parser.add_argument("--months", nargs="*", default=None)
+    parser.add_argument("--split", choices=["train", "val", "test", "all"], default="test")
     parser.add_argument("--device", default=None)
     return parser.parse_args()
 
@@ -71,6 +73,14 @@ def main() -> None:
     months = sorted(set(dynamic) & set(targets))
     if args.months:
         months = [month for month in months if month in set(args.months)]
+    elif args.split != "all":
+        train_months, val_months, test_months = default_split_months(config, months)
+        split_lookup = {
+            "train": train_months,
+            "val": val_months,
+            "test": test_months,
+        }
+        months = split_lookup[args.split]
     if not months:
         raise ValueError("No evaluation months selected")
 

@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.data.dataset import WeatherGraphDataset
 from src.models import build_mlp_baseline_from_config
 from src.training.metrics import summarize_metrics
-from src.training.train import collate_samples, load_config, paired_month_files, resolve_path, split_months
+from src.training.train import collate_samples, default_split_months, load_config, paired_month_files, resolve_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,12 +43,16 @@ def build_month_datasets(config: dict, dynamic_dir: Path, target_dir: Path, trai
         raise ValueError("No paired dynamic/target monthly tensors found")
     months = [month for month, _, _ in month_files]
     if train_months is None:
-        train_months, val_months = split_months(months, int(config["training"]["validation_months"]))
+        train_months, val_months, test_months = default_split_months(config, months)
+    else:
+        test_months = [month for month in months if month not in set(train_months) | set(val_months or [])]
     train_pairs = [(d, t) for month, d, t in month_files if month in train_months]
     val_pairs = [(d, t) for month, d, t in month_files if month in (val_months or [])]
+    test_pairs = [(d, t) for month, d, t in month_files if month in test_months]
     train_dataset = WeatherGraphDataset(graph_path, [d for d, _ in train_pairs], [t for _, t in train_pairs])
     val_dataset = WeatherGraphDataset(graph_path, [d for d, _ in val_pairs], [t for _, t in val_pairs]) if val_pairs else None
-    return train_dataset, val_dataset, train_months, val_months or []
+    test_dataset = WeatherGraphDataset(graph_path, [d for d, _ in test_pairs], [t for _, t in test_pairs]) if test_pairs else None
+    return train_dataset, val_dataset, test_dataset, train_months, val_months or [], test_months
 
 
 def evaluate_model(model: nn.Module, dataset: WeatherGraphDataset, device: torch.device) -> dict[str, float]:
@@ -61,6 +65,19 @@ def evaluate_model(model: nn.Module, dataset: WeatherGraphDataset, device: torch
             x = batch["x"].to(device)
             preds.append(model(x).cpu())
             targets.append(batch["y"].cpu())
+    return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0))
+
+
+def evaluate_xgboost_model(model, dataset: WeatherGraphDataset) -> dict[str, float]:
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_samples)
+    preds = []
+    targets = []
+    for batch in loader:
+        x = batch["x"].reshape(-1, batch["x"].shape[-1]).numpy()
+        y = batch["y"]
+        pred = torch.from_numpy(model.predict(x)).reshape_as(y)
+        preds.append(pred)
+        targets.append(y)
     return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0))
 
 
@@ -150,20 +167,8 @@ def train_xgboost(config: dict, train_dataset: WeatherGraphDataset, val_dataset:
     )
     model.fit(x_train.numpy(), y_train.numpy())
 
-    def eval_dataset(dataset: WeatherGraphDataset) -> dict[str, float]:
-        loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_samples)
-        preds = []
-        targets = []
-        for batch in loader:
-            x = batch["x"].reshape(-1, batch["x"].shape[-1]).numpy()
-            y = batch["y"]
-            pred = torch.from_numpy(model.predict(x)).reshape_as(y)
-            preds.append(pred)
-            targets.append(y)
-        return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0))
-
-    train_metrics = eval_dataset(train_dataset)
-    val_metrics = eval_dataset(val_dataset) if val_dataset is not None else {}
+    train_metrics = evaluate_xgboost_model(model, train_dataset)
+    val_metrics = evaluate_xgboost_model(model, val_dataset) if val_dataset is not None else {}
     return model, train_metrics, val_metrics
 
 
@@ -180,7 +185,7 @@ def main() -> None:
     output_dir = resolve_path(args.output_dir or config["baselines"]["output_dir"]) / args.model
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    train_dataset, val_dataset, train_months, val_months = build_month_datasets(
+    train_dataset, val_dataset, test_dataset, train_months, val_months, test_months = build_month_datasets(
         config, dynamic_dir, target_dir, args.train_months, args.val_months
     )
 
@@ -188,6 +193,7 @@ def main() -> None:
         model = InterpolationWrapper(list(config["baselines"]["interpolation"]["coarse_feature_indices"]))
         train_metrics = evaluate_model(model, train_dataset, torch.device("cpu"))
         val_metrics = evaluate_model(model, val_dataset, torch.device("cpu")) if val_dataset is not None else {}
+        test_metrics = evaluate_model(model, test_dataset, torch.device("cpu")) if test_dataset is not None else {}
         artifact = None
     elif args.model == "mlp":
         model, train_metrics, val_metrics = train_mlp(
@@ -196,10 +202,16 @@ def main() -> None:
             val_dataset,
             torch.device(args.device or config["training"]["device"]),
         )
+        test_metrics = (
+            evaluate_model(model, test_dataset, torch.device(args.device or config["training"]["device"]))
+            if test_dataset is not None
+            else {}
+        )
         artifact = output_dir / "model.pt"
         torch.save(model.state_dict(), artifact)
     else:
         model, train_metrics, val_metrics = train_xgboost(config, train_dataset, val_dataset)
+        test_metrics = evaluate_xgboost_model(model, test_dataset) if test_dataset is not None else {}
         artifact = output_dir / "model.pkl"
         with artifact.open("wb") as handle:
             pickle.dump(model, handle)
@@ -208,8 +220,10 @@ def main() -> None:
         "model": args.model,
         "train_months": train_months,
         "val_months": val_months,
+        "test_months": test_months,
         "train": train_metrics,
         "validation": val_metrics,
+        "test": test_metrics,
         "primary_metric": config["baselines"]["primary_metric"],
         "validation_primary_value": mean_rmse(val_metrics) if val_metrics else mean_rmse(train_metrics),
     }

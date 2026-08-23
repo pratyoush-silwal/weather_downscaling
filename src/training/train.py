@@ -63,10 +63,44 @@ def paired_month_files(dynamic_dir: Path, target_dir: Path) -> list[tuple[str, P
     return [(month, dynamic[month], targets[month]) for month in months]
 
 
-def split_months(months: list[str], validation_months: int) -> tuple[list[str], list[str]]:
-    if validation_months <= 0 or validation_months >= len(months):
-        return months, []
-    return months[:-validation_months], months[-validation_months:]
+def year_from_month(month: str) -> int:
+    return int(month[:4])
+
+
+def split_months_by_year(
+    months: list[str],
+    train_years: int,
+    validation_years: int,
+    test_years: int,
+) -> tuple[list[str], list[str], list[str]]:
+    years = sorted({year_from_month(month) for month in months})
+    total = train_years + validation_years + test_years
+    if total <= 0:
+        raise ValueError("Split sizes must be positive")
+    if total > len(years):
+        available = len(years)
+        test_years = min(test_years, max(available - 2, 0))
+        validation_years = min(validation_years, max(available - test_years - 1, 0))
+        train_years = max(available - validation_years - test_years, 1)
+        total = train_years + validation_years + test_years
+    selected_years = years[-total:]
+    train_set = set(selected_years[:train_years])
+    val_set = set(selected_years[train_years : train_years + validation_years])
+    test_set = set(selected_years[train_years + validation_years :])
+    train_months = [month for month in months if year_from_month(month) in train_set]
+    val_months = [month for month in months if year_from_month(month) in val_set]
+    test_months = [month for month in months if year_from_month(month) in test_set]
+    return train_months, val_months, test_months
+
+
+def default_split_months(config: dict, months: list[str]) -> tuple[list[str], list[str], list[str]]:
+    training = config["training"]
+    return split_months_by_year(
+        months,
+        int(training["train_years"]),
+        int(training["validation_years"]),
+        int(training["test_years"]),
+    )
 
 
 def collate_samples(samples: list[dict]) -> dict:
@@ -141,6 +175,7 @@ def write_summary(
     last_epoch: int,
     train_months: list[str],
     val_months: list[str],
+    test_months: list[str],
     graph_path: Path,
     dynamic_dir: Path,
     target_dir: Path,
@@ -153,6 +188,7 @@ def write_summary(
         "last_epoch": last_epoch,
         "train_months": train_months,
         "val_months": val_months,
+        "test_months": test_months,
         "graph": str(graph_path),
         "dynamic_dir": str(dynamic_dir),
         "target_dir": str(target_dir),
@@ -182,8 +218,9 @@ def main() -> None:
     if args.train_months:
         train_months = args.train_months
         val_months = args.val_months or []
+        test_months = [month for month in available_months if month not in set(train_months) | set(val_months)]
     else:
-        train_months, val_months = split_months(available_months, int(config["training"]["validation_months"]))
+        train_months, val_months, test_months = default_split_months(config, available_months)
 
     train_pairs = [(d, t) for month, d, t in month_files if month in train_months]
     val_pairs = [(d, t) for month, d, t in month_files if month in val_months]
@@ -243,6 +280,7 @@ def main() -> None:
             start_epoch - 1,
             train_months,
             val_months,
+            test_months,
             graph_path,
             dynamic_dir,
             target_dir,
@@ -291,6 +329,7 @@ def main() -> None:
             "config": config,
             "train_months": train_months,
             "val_months": val_months,
+            "test_months": test_months,
             "best_val_loss": best_val,
             "best_epoch": best_epoch,
             "best_metrics": best_metrics,
@@ -313,6 +352,7 @@ def main() -> None:
         epochs,
         train_months,
         val_months,
+        test_months,
         graph_path,
         dynamic_dir,
         target_dir,

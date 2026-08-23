@@ -515,6 +515,30 @@ The current training flow is:
 
 The graph is static. Do not build a new graph for every date. Each timestep uses the same graph topology with different weather features.
 
+Default chronological split:
+
+```text
+train: 1990-2016  (27 years, 324 months)
+val:   2017-2019  (3 years, 36 months)
+test:  2020-2022  (3 years, 36 months)
+```
+
+This is a year-based split, not a random or month-shuffled split. The ratio is about:
+
+```text
+train 81.8%
+val    9.1%
+test   9.1%
+```
+
+The split is chosen to keep:
+
+- a large training block for stable fitting
+- multiple full annual cycles in validation
+- a fully held-out multi-year test block
+
+This is more defensible for weather data than validating on a single final year or randomly mixing months across years.
+
 Typical commands:
 
 ```bash
@@ -523,7 +547,7 @@ python src/data/preprocess_era5.py
 python src/data/preprocess_era5land.py
 python src/data/build_targets.py
 python src/training/train.py
-python src/training/evaluate.py --checkpoint checkpoints/best.pt
+python src/training/evaluate.py --checkpoint checkpoints/best.pt --split test
 python src/training/train_baseline.py --model interpolation
 python src/training/train_baseline.py --model mlp
 python src/training/train_baseline.py --model xgboost

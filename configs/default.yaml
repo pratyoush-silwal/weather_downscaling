@@ -202,7 +202,9 @@ training:
   weight_decay: 0.00001
   epochs: 50
   gradient_clip_norm: 1.0
-  validation_months: 12
+  train_years: 27
+  validation_years: 3
+  test_years: 3
   checkpoint_dir: checkpoints
   experiments_root: data/processed/buffer_experiments
   device: cpu
