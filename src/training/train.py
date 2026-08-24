@@ -52,6 +52,13 @@ def load_config(path: str | Path) -> dict:
         return yaml.safe_load(handle)
 
 
+def resolve_device(device_name: str | None) -> torch.device:
+    name = str(device_name or "auto").lower()
+    if name == "auto":
+        name = "cuda" if torch.cuda.is_available() else "cpu"
+    return torch.device(name)
+
+
 def month_from_path(path: Path) -> str:
     return path.stem.rsplit("_", 1)[-1]
 
@@ -245,7 +252,7 @@ def main() -> None:
     )
 
     model = build_pignn_from_config(config["model"])
-    device = torch.device(config["training"]["device"])
+    device = resolve_device(config["training"]["device"])
     model.to(device)
     optimizer = AdamW(
         model.parameters(),

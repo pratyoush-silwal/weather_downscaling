@@ -49,7 +49,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.data.dataset import WeatherGraphDataset
 from src.models import build_mlp_baseline_from_config, build_pignn_from_config
-from src.training.train import collate_samples, default_split_months
+from src.training.train import collate_samples, default_split_months, resolve_device
 
 
 TARGET_NAMES = ["temperature", "precipitation", "u_wind", "v_wind"]
@@ -305,7 +305,7 @@ def code_block(text: str, language: str = "") -> str:
 def main() -> None:
     args = parse_args()
     config = load_config(args.config)
-    device = torch.device(config["training"]["device"])
+    device = resolve_device(config["training"]["device"])
     output_dir = resolve_path(args.output_dir)
     report_path = resolve_path(args.report)
     output_dir.mkdir(parents=True, exist_ok=True)

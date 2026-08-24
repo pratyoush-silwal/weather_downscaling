@@ -207,7 +207,7 @@ training:
   test_years: 3
   checkpoint_dir: checkpoints
   experiments_root: data/processed/buffer_experiments
-  device: cpu
+  device: auto
   num_workers: 0
 
 baselines:

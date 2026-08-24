@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.data.dataset import WeatherGraphDataset
 from src.models import build_mlp_baseline_from_config
 from src.training.metrics import summarize_metrics
-from src.training.train import collate_samples, default_split_months, load_config, paired_month_files, resolve_path
+from src.training.train import collate_samples, default_split_months, load_config, paired_month_files, resolve_device, resolve_path
 
 
 def parse_args() -> argparse.Namespace:
@@ -200,10 +200,10 @@ def main() -> None:
             config,
             train_dataset,
             val_dataset,
-            torch.device(args.device or config["training"]["device"]),
+            resolve_device(args.device or config["training"]["device"]),
         )
         test_metrics = (
-            evaluate_model(model, test_dataset, torch.device(args.device or config["training"]["device"]))
+            evaluate_model(model, test_dataset, resolve_device(args.device or config["training"]["device"]))
             if test_dataset is not None
             else {}
         )

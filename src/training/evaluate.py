@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.data.dataset import WeatherGraphDataset
 from src.models import build_pignn_from_config
 from src.training.metrics import summarize_metrics
-from src.training.train import default_split_months
+from src.training.train import default_split_months, resolve_device
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,7 +95,7 @@ def main() -> None:
     checkpoint = torch.load(resolve_path(args.checkpoint), map_location="cpu", weights_only=False)
     model = build_pignn_from_config(config["model"])
     model.load_state_dict(checkpoint["model_state"])
-    device = torch.device(args.device or config["training"]["device"])
+    device = resolve_device(args.device or config["training"]["device"])
     model.to(device)
     model.eval()
 
