@@ -54,6 +54,14 @@ def _ensure_batched_node_values(values: torch.Tensor) -> tuple[torch.Tensor, boo
     raise ValueError(f"Expected [N] or [B,N], got {tuple(values.shape)}")
 
 
+def _ensure_static_node_values(values: torch.Tensor) -> torch.Tensor:
+    if values.ndim == 1:
+        return values
+    if values.ndim == 2:
+        return values[0]
+    raise ValueError(f"Expected [N] or [B,N], got {tuple(values.shape)}")
+
+
 def lapse_rate_loss(
     prediction: torch.Tensor,
     edge_index: torch.Tensor,
@@ -76,7 +84,9 @@ def lapse_rate_loss(
 
     temp = prediction[..., temperature_channel]
     temp_batched, _ = _ensure_batched_node_values(temp)
-    elev = elevation.to(device=prediction.device, dtype=prediction.dtype)
+    elev = _ensure_static_node_values(
+        elevation.to(device=prediction.device, dtype=prediction.dtype)
+    )
     src = edge_index[0].to(prediction.device).long()
     dst = edge_index[1].to(prediction.device).long()
 
