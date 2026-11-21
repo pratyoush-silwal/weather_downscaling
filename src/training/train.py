@@ -263,6 +263,7 @@ def main() -> None:
     loss_fn = PIGNNLoss(
         weights=LossWeights(**loss_cfg["weights"]),
         data_loss=loss_cfg["data_loss"],
+        channel_scales=loss_cfg.get("channel_scales"),
         channel_weights=tuple(loss_cfg["channel_weights"]) if loss_cfg["channel_weights"] else None,
         temperature_channel=int(loss_cfg["temperature_channel"]),
         u_channel=int(loss_cfg["u_channel"]),

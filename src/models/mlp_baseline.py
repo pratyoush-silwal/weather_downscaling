@@ -25,6 +25,9 @@ class MLPBaselineConfig:
     use_coarse_temperature_residual: bool = True
     use_coarse_precipitation_residual: bool = True
     use_coarse_wind_residual: bool = True
+    input_offsets: tuple[float, ...] | None = None
+    input_scales: tuple[float, ...] | None = None
+    output_scales: tuple[float, ...] | None = None
 
 
 class NodewiseMLPBaseline(nn.Module):
@@ -37,6 +40,12 @@ class NodewiseMLPBaseline(nn.Module):
         elif kwargs:
             raise ValueError("Pass either config or keyword overrides, not both")
         self.config = config
+        from src.utils.normalization import affine_parameters
+        offset, scale = affine_parameters(config.node_input_channels, config.input_offsets, config.input_scales)
+        self.register_buffer("input_offset", offset)
+        self.register_buffer("input_scale", scale)
+        _, scale = affine_parameters(config.output_channels, None, config.output_scales)
+        self.register_buffer("output_scale", scale)
         self.backbone = MLP(
             in_channels=config.node_input_channels,
             hidden_channels=config.hidden_channels,
@@ -54,7 +63,7 @@ class NodewiseMLPBaseline(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.head(self.backbone(x))
+        out = self.head(self.backbone((x - self.input_offset) / self.input_scale)) * self.output_scale
         channels = list(torch.unbind(out, dim=-1))
         if self.config.use_coarse_temperature_residual and self.config.output_channels >= 1:
             channels[0] = channels[0] + x[..., self.config.coarse_temperature_channel]

@@ -196,6 +196,7 @@ class PIGNNLoss(nn.Module):
         u_channel: int = 2,
         v_channel: int = 3,
         lapse_rate_k_per_m: float = -0.0065,
+        channel_scales: tuple[float, ...] | None = None,
     ) -> None:
         super().__init__()
         self.weights = weights or LossWeights()
@@ -204,6 +205,9 @@ class PIGNNLoss(nn.Module):
         self.u_channel = u_channel
         self.v_channel = v_channel
         self.lapse_rate_k_per_m = lapse_rate_k_per_m
+        from src.utils.normalization import affine_parameters
+        _, scales = affine_parameters(len(channel_scales), None, channel_scales) if channel_scales is not None else (None, None)
+        self.register_buffer("channel_scales", scales)
         if channel_weights is None:
             self.register_buffer("channel_weights", None)
         else:
@@ -218,13 +222,17 @@ class PIGNNLoss(nn.Module):
         pos: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         components: dict[str, torch.Tensor] = {}
+        data_prediction, data_target = prediction, target
+        if self.channel_scales is not None and target is not None:
+            data_prediction = prediction / self.channel_scales.to(prediction)
+            data_target = target / self.channel_scales.to(prediction)
 
         if target is None or self.weights.data == 0:
             data = prediction.new_tensor(0.0)
         elif self.data_loss == "mse":
-            data = masked_mse(prediction, target, self.channel_weights)
+            data = masked_mse(data_prediction, data_target, self.channel_weights)
         elif self.data_loss == "mae":
-            data = masked_mae(prediction, target, self.channel_weights)
+            data = masked_mae(data_prediction, data_target, self.channel_weights)
         else:
             raise ValueError(f"Unsupported data loss: {self.data_loss}")
         components["data"] = data

@@ -102,7 +102,10 @@ def train_mlp(config: dict, train_dataset: WeatherGraphDataset, val_dataset: Wea
         lr=float(config["baselines"]["mlp"]["learning_rate"]),
         weight_decay=float(config["baselines"]["mlp"]["weight_decay"]),
     )
-    loss_fn = nn.MSELoss()
+    from src.models.losses import masked_mse
+    from src.utils.normalization import affine_parameters
+    _, scales = affine_parameters(4, None, config["loss"].get("channel_scales"))
+    scales = scales.to(device)
     loader = DataLoader(
         train_dataset,
         batch_size=int(config["baselines"]["mlp"]["batch_size"]),
@@ -115,7 +118,7 @@ def train_mlp(config: dict, train_dataset: WeatherGraphDataset, val_dataset: Wea
         for batch in loader:
             optimizer.zero_grad(set_to_none=True)
             prediction = model(batch["x"].to(device))
-            loss = loss_fn(prediction, batch["y"].to(device))
+            loss = masked_mse(prediction / scales, batch["y"].to(device) / scales)
             loss.backward()
             optimizer.step()
     train_metrics = evaluate_model(model, train_dataset, device)

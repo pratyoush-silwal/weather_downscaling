@@ -35,6 +35,10 @@ class PIGNNConfig:
     use_coarse_temperature_residual: bool = True
     use_coarse_precipitation_residual: bool = True
     use_coarse_wind_residual: bool = True
+    input_offsets: tuple[float, ...] | None = None
+    input_scales: tuple[float, ...] | None = None
+    edge_scales: tuple[float, ...] | None = None
+    output_scales: tuple[float, ...] | None = None
 
 
 class PIGNN(nn.Module):
@@ -63,6 +67,14 @@ class PIGNN(nn.Module):
         elif kwargs:
             raise ValueError("Pass either config or keyword overrides, not both")
         self.config = config
+        from src.utils.normalization import affine_parameters
+        offset, scale = affine_parameters(config.node_input_channels, config.input_offsets, config.input_scales)
+        self.register_buffer("input_offset", offset)
+        self.register_buffer("input_scale", scale)
+        _, scale = affine_parameters(config.edge_input_channels, None, config.edge_scales)
+        self.register_buffer("edge_scale", scale)
+        _, scale = affine_parameters(config.output_channels, None, config.output_scales)
+        self.register_buffer("output_scale", scale)
 
         self.node_encoder = MLP(
             in_channels=config.node_input_channels,
@@ -107,13 +119,13 @@ class PIGNN(nn.Module):
         edge_attr: torch.Tensor,
     ) -> torch.Tensor:
         edge_attr = edge_attr.to(device=x.device, dtype=x.dtype)
-        encoded_edges = self.edge_encoder(edge_attr)
+        encoded_edges = self.edge_encoder(edge_attr / self.edge_scale)
 
-        h = self.node_encoder(x)
+        h = self.node_encoder((x - self.input_offset) / self.input_scale)
         for block in self.blocks:
             h = block(h, edge_index.to(x.device), encoded_edges)
 
-        out = self.head(self.norm(h))
+        out = self.head(self.norm(h)) * self.output_scale
         return self._add_coarse_residuals(out, x)
 
     def _add_coarse_residuals(self, out: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
