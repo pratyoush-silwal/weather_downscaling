@@ -9,7 +9,28 @@ from typing import Sequence
 from zipfile import is_zipfile
 
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
+
+
+class MonthlySampler(Sampler):
+    """Shuffle months, then hours within each month, without cache thrashing."""
+
+    def __init__(self, dataset):
+        self.dataset = dataset
+        self.seed = None
+        self.skip = 0
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __iter__(self):
+        generator = None if self.seed is None else torch.Generator().manual_seed(self.seed)
+        skip = self.skip
+        for month in torch.randperm(len(self.dataset._lengths), generator=generator).tolist():
+            start = self.dataset._cumulative[month - 1] if month else 0
+            hours = torch.randperm(self.dataset._lengths[month], generator=generator).tolist()
+            yield from (start + hour for hour in hours[skip:])
+            skip = max(0, skip - len(hours))
 
 
 FULL_FEATURE_NAMES = [
@@ -29,7 +50,7 @@ FULL_FEATURE_NAMES = [
 
 def _load_torch(path: str | Path) -> dict:
     try:
-        return torch.load(path, map_location="cpu", weights_only=False)
+        return torch.load(path, map_location="cpu", weights_only=False, mmap=is_zipfile(path))
     except TypeError:
         return torch.load(path, map_location="cpu")
 

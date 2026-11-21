@@ -115,6 +115,7 @@ class EdgeConditionedMessagePassing(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: torch.Tensor,
+        degree: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x_batched, was_batched = self._ensure_batched(x)
         if edge_index.ndim != 2 or edge_index.shape[0] != 2:
@@ -138,10 +139,9 @@ class EdgeConditionedMessagePassing(nn.Module):
         aggregated = x_batched.new_zeros(batch_size, node_count, messages.shape[-1])
         aggregated.index_add_(1, dst, messages)
 
-        degree = torch.bincount(dst, minlength=node_count).to(
-            device=x_batched.device,
-            dtype=x_batched.dtype,
-        )
+        if degree is None:
+            degree = torch.bincount(dst, minlength=node_count)
+        degree = degree.to(x_batched)
         aggregated = aggregated / degree.clamp_min(1.0).view(1, -1, 1)
 
         updated = self.update_mlp(torch.cat([x_batched, aggregated], dim=-1))
@@ -181,8 +181,9 @@ class ResidualGraphBlock(nn.Module):
         x: torch.Tensor,
         edge_index: torch.Tensor,
         edge_attr: torch.Tensor,
+        degree: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        h = x + self.dropout(self.message_passing(self.norm_message(x), edge_index, edge_attr))
+        h = x + self.dropout(self.message_passing(self.norm_message(x), edge_index, edge_attr, degree))
         h = h + self.dropout(self.feed_forward(self.norm_ff(h)))
         return h
 

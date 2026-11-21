@@ -100,7 +100,11 @@ def deaccumulate_precipitation(times, cumulative, previous_time=None, previous_v
 
 def _load_interp(xr, ds, logical_name: str, lat: np.ndarray, lon: np.ndarray, method: str):
     timestamps = _timestamps(ds)
-    data = interpolate_to_nodes(xr, select_times(ds[variable_name(ds, logical_name)], timestamps), lat, lon, method).values
+    field = ds[variable_name(ds, logical_name)]
+    data = np.empty((len(timestamps), len(lat)), dtype=np.float64 if logical_name == "tp" else np.float32)
+    for start in range(0, len(timestamps), 48):
+        window = slice(start, start + 48)
+        data[window] = interpolate_to_nodes(xr, select_times(field, timestamps[window]), lat, lon, method).values
     return timestamps, data
 
 
@@ -162,10 +166,11 @@ def preprocess_month(
     base_idx = time_index.get_indexer(common)
     tp_idx = precip_index.get_indexer(common)
 
-    y = np.stack(
-        [t2m[base_idx], tp[tp_idx], u10[base_idx], v10[base_idx]],
-        axis=-1,
-    ).astype(np.float32)
+    y = np.empty((len(common), len(lat), 4), dtype=np.float32)
+    for channel, (field, indices) in enumerate(((t2m, base_idx), (tp, tp_idx), (u10, base_idx), (v10, base_idx))):
+        for start in range(0, len(common), 48):
+            window = slice(start, start + 48)
+            y[window, :, channel] = field[indices[window]]
     output_dir.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".part")
     torch.save(
@@ -175,6 +180,7 @@ def preprocess_month(
             "target_names": TARGET_NAMES,
             "metadata": {
                 "month": yyyymm,
+                "era5land_file": str(output_path),
                 "source_file": str(input_path),
                 "precipitation_file": str(precip_path if precip_path.exists() else input_path),
                 "interpolation": method,

@@ -243,14 +243,14 @@ class PIGNNLoss(nn.Module):
             elevation=elevation,
             temperature_channel=self.temperature_channel,
             lapse_rate_k_per_m=self.lapse_rate_k_per_m,
-        )
+        ) if self.weights.lapse_rate else prediction.new_zeros(())
         components["divergence"] = graph_divergence_loss(
             prediction=prediction,
             edge_index=edge_index,
             pos=pos,
             u_channel=self.u_channel,
             v_channel=self.v_channel,
-        )
+        ) if self.weights.divergence else prediction.new_zeros(())
 
         total = (
             self.weights.data * components["data"]

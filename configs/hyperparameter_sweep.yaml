@@ -8,7 +8,7 @@ selection_metric: best_val_loss
 fixed_overrides:
   training.epochs: 50
   training.batch_size: 1
-  training.device: cpu
+  training.device: auto
 
 # Optional subsets for quicker experiments.
 months: null

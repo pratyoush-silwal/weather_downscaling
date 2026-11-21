@@ -178,14 +178,42 @@ def _single_level_paths(path: Path) -> dict[str, Path]:
 
     extract_dir = path.parent / f".{path.stem}_unzipped"
     extract_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(path) as archive:
-        names = archive.namelist()
-        for name in names:
-            target = extract_dir / Path(name).name
-            if not target.exists() or target.stat().st_size == 0:
-                archive.extract(name, extract_dir)
-        instant = next((extract_dir / Path(name).name for name in names if "stepType-instant" in name), None)
-        accum = next((extract_dir / Path(name).name for name in names if "stepType-accum" in name), None)
+    import fcntl
+    import json
+    import shutil
+    import tempfile
+    # Lock inode stays in place so concurrent readers cannot acquire different locks.
+    with (extract_dir / ".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with zipfile.ZipFile(path) as archive:
+            members = [member for member in archive.infolist() if not member.is_dir()]
+            names = [member.filename for member in members]
+            if len({Path(name).name for name in names}) != len(names):
+                raise ValueError("Archive contains duplicate member basenames")
+            stamp = {"size": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns,
+                     "members": [[m.filename, m.CRC, m.file_size] for m in members]}
+            manifest = extract_dir / ".manifest.json"
+            try:
+                fresh = json.loads(manifest.read_text()) == stamp
+            except (FileNotFoundError, ValueError):
+                fresh = False
+            for member in members:
+                target = extract_dir / Path(member.filename).name
+                if fresh and target.exists() and target.stat().st_size == member.file_size:
+                    continue
+                temporary = None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=extract_dir, delete=False) as output:
+                        temporary = Path(output.name)
+                        with archive.open(member) as source:
+                            shutil.copyfileobj(source, output, length=1024 * 1024)
+                    temporary.replace(target)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+            manifest.write_text(json.dumps(stamp))
+            instant = next((extract_dir / Path(name).name for name in names if "stepType-instant" in name), None)
+            accum = next((extract_dir / Path(name).name for name in names if "stepType-accum" in name), None)
     if instant is None or accum is None:
         raise ValueError(f"{path} is zipped but missing expected instant/accum NetCDF members")
     return {"instant": instant, "accum": accum}
@@ -333,21 +361,15 @@ def preprocess_month(xr, graph: dict, input_dir: Path, output_dir: Path, yyyymm:
             "z500": z500[variable_name(z500, "z500")],
         }
         times = common_times(raw_arrays)
-        arrays = {
-            name: interpolate_to_nodes(xr, select_times(da, times), lat, lon, args.method)
-            for name, da in raw_arrays.items()
-        }
-        x_dynamic = np.stack(
-            [
-                arrays["t2m"].values,
-                arrays["q850"].values,
-                arrays["u10"].values,
-                arrays["v10"].values,
-                arrays["z500"].values / 9.80665 if args.z500_as_height else arrays["z500"].values,
-                arrays["tp"].values,
-            ],
-            axis=-1,
-        ).astype(np.float32)
+        x_dynamic = np.empty((len(times), node_count, 6), dtype=np.float32)
+        for channel, name in enumerate(("t2m", "q850", "u10", "v10", "z500", "tp")):
+            for start in range(0, len(times), 48):
+                window = slice(start, start + 48)
+                da = select_times(raw_arrays[name], times[window])
+                values = interpolate_to_nodes(xr, da, lat, lon, args.method).values
+                if name == "z500" and args.z500_as_height:
+                    values = values / 9.80665
+                x_dynamic[window, :, channel] = values
 
     time_features = temporal_features(times)
     if not np.isfinite(x_dynamic).all():

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -209,48 +210,52 @@ def predict_interpolation(batch: dict[str, torch.Tensor], config: dict[str, Any]
     return torch.stack([batch["x"][..., i] for i in idx], dim=-1)
 
 
-def collect_predictions(
-    model_name: str,
-    loader: DataLoader,
-    device: torch.device,
-    config: dict[str, Any],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    preds = []
-    ys = []
-    if model_name == "interpolation":
-        for batch in loader:
-            preds.append(predict_interpolation(batch, config))
-            ys.append(batch["y"])
-        return torch.cat(preds, dim=0), torch.cat(ys, dim=0)
-
-    if model_name == "mlp":
-        model = load_mlp(device, config)
-        with torch.no_grad():
-            for batch in loader:
-                preds.append(model(batch["x"].to(device)).cpu())
-                ys.append(batch["y"])
-        return torch.cat(preds, dim=0), torch.cat(ys, dim=0)
-
-    if model_name == "xgboost":
-        model = load_xgboost(config)
-        for batch in loader:
-            x = batch["x"].reshape(-1, batch["x"].shape[-1]).numpy()
-            y = batch["y"]
-            pred = torch.from_numpy(model.predict(x)).reshape_as(y)
-            preds.append(pred)
-            ys.append(y)
-        return torch.cat(preds, dim=0), torch.cat(ys, dim=0)
-
-    if model_name == "gnn":
-        model = load_gnn(device, config)
-        with torch.no_grad():
-            for batch in loader:
-                pred = model(batch["x"].to(device), batch["edge_index"].to(device), batch["edge_attr"].to(device)).cpu()
-                preds.append(pred)
-                ys.append(batch["y"])
-        return torch.cat(preds, dim=0), torch.cat(ys, dim=0)
-
-    raise ValueError(model_name)
+def compare_stream(model_name, loader, device, config):
+    model = {"interpolation": lambda: None, "mlp": lambda: load_mlp(device, config),
+             "gnn": lambda: load_gnn(device, config), "xgboost": lambda: load_xgboost(config)}[model_name]()
+    dataset = loader.dataset
+    edges = (dataset.edge_index.to(device), dataset.edge_attr.to(device)) if model_name == "gnn" else ()
+    sums = torch.zeros(9, 4, dtype=torch.float64)
+    events = torch.zeros(3, dtype=torch.float64)
+    scatter, truth, series, observed = [], [], [], []
+    stride = max(1, math.ceil(len(dataset) / 200))
+    node_stride = max(1, math.ceil(len(dataset.pos) / 128))
+    with torch.inference_mode():
+        for step, batch in enumerate(loader):
+            x, y = batch["x"], batch["y"]
+            if model_name == "interpolation":
+                p = predict_interpolation(batch, config)
+            elif model_name == "xgboost":
+                p = torch.from_numpy(model.predict(x.flatten(0, 1).numpy())).reshape_as(y)
+            else:
+                p = model(x.to(device), *edges).cpu()
+            if step % stride == 0:
+                scatter.append(p[:, ::node_stride].clone())
+                truth.append(y[:, ::node_stride].clone())
+            if step < 168:
+                series.append(p[:, :1].clone())
+                observed.append(y[:, :1].clone())
+            valid = torch.isfinite(y) & torch.isfinite(p) & dataset.in_region_mask[:, None]
+            a, b = (torch.where(valid, field, 0).double() for field in (y, p))
+            d = b - a
+            for i, field in enumerate((valid, a, b, a*a, b*b, a*b, d, d.abs(), d*d)):
+                sums[i] += field.sum((0, 1))
+            wet, rain = a[..., 1] >= EVENT_THRESHOLD, b[..., 1] >= EVENT_THRESHOLD
+            for i, event in enumerate((wet & rain, ~wet & rain, wet & ~rain)):
+                events[i] += (event & valid[..., 1]).sum()
+    n, a, b, aa, bb, ab, d, ad, dd = sums
+    va, vb = (aa - a*a/n).clamp_min(0), (bb - b*b/n).clamp_min(0)
+    def ratio(x, y):
+        return x / torch.where(y != 0, y, float("nan"))
+    r = ratio(ab-a*b/n, (va*vb).sqrt())
+    skill = 1 - ratio(dd, va)
+    k = 1 - ((r-1)**2 + (ratio(vb,va).sqrt()-1)**2 + (ratio(b,a)-1)**2).sqrt()
+    table = pd.DataFrame(dict(rmse=(dd/n).sqrt(), mae=ad/n, bias=d/n, corr=r, r2=skill, nse=skill, kge=k), index=TARGET_NAMES)
+    tp, fp, fn = events
+    for key, value in dict(pod=ratio(tp,tp+fn), far=ratio(fp,tp+fp), csi=ratio(tp,tp+fp+fn),
+                           frequency_bias=ratio(tp+fp,tp+fn)).items():
+        table.loc["precipitation", key] = float(value)
+    return table, torch.cat(scatter), torch.cat(truth), torch.cat(series), torch.cat(observed)
 
 
 def save_fig(path: Path) -> None:
@@ -341,10 +346,11 @@ def main() -> None:
     summary_rows: list[dict[str, float | str]] = []
     reference_target: torch.Tensor | None = None
     skipped_models: dict[str, str] = {}
+    series = {}
 
     for model_name in requested_models:
         try:
-            pred, y_true = collect_predictions(model_name, loader, device, config)
+            table, pred, y_true, series[model_name], observed = compare_stream(model_name, loader, device, config)
         except FileNotFoundError as exc:
             skipped_models[model_name] = str(exc)
             continue
@@ -352,7 +358,6 @@ def main() -> None:
         predictions[model_name] = pred
         if reference_target is None:
             reference_target = y_true
-        table = summarize_all(y_true, pred, node_mask=region_mask)
         metric_tables[model_name] = table
         summary_rows.append(
             {
@@ -396,7 +401,7 @@ def main() -> None:
     images.append(("RMSE by Target", path))
 
     model_names = available_models
-    sample_step = max(1, len(dataset) // 200)
+    sample_step = 1  # Already sampled while streaming the metrics.
     flat_true = reference_target[::sample_step].reshape(-1, reference_target.shape[-1])
     fig, axes = plt.subplots(len(TARGET_NAMES), len(model_names), figsize=(4 * len(model_names), 3 * len(TARGET_NAMES)), squeeze=False)
     for col, model_name in enumerate(model_names):
@@ -416,9 +421,9 @@ def main() -> None:
     time_steps = min(168, len(dataset))
     fig, axes = plt.subplots(len(TARGET_NAMES), 1, figsize=(14, 10), sharex=True)
     for row, target_name in enumerate(TARGET_NAMES):
-        axes[row].plot(reference_target[:time_steps, node_idx, row].numpy(), label="target", linewidth=2)
+        axes[row].plot(observed[:time_steps, node_idx, row].numpy(), label="target", linewidth=2)
         for model_name in model_names:
-            axes[row].plot(predictions[model_name][:time_steps, node_idx, row].numpy(), label=model_name, alpha=0.8)
+            axes[row].plot(series[model_name][:time_steps, node_idx, row].numpy(), label=model_name, alpha=0.8)
         axes[row].set_title(target_name)
         axes[row].grid(alpha=0.3)
     axes[0].legend(ncol=max(1, len(model_names) + 1), fontsize=8)
@@ -429,7 +434,7 @@ def main() -> None:
     fig, axes = plt.subplots(1, len(model_names), figsize=(4 * len(model_names), 3), sharey=True, squeeze=False)
     for ax, model_name in zip(axes[0], model_names):
         residual = (predictions[model_name][..., 1] - reference_target[..., 1]).reshape(-1).numpy()
-        ax.hist(residual, bins=60, alpha=0.8)
+        ax.hist(residual[np.isfinite(residual)], bins=60, alpha=0.8)
         ax.set_title(f"{model_name} precip residual")
         ax.grid(alpha=0.2)
     path = output_dir / "precip_residuals.png"

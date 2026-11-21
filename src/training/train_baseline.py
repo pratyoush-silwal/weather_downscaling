@@ -17,9 +17,9 @@ from torch.utils.data import DataLoader, Subset
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data.dataset import WeatherGraphDataset
+from src.data.dataset import WeatherGraphDataset, MonthlySampler
 from src.models import build_mlp_baseline_from_config
-from src.training.metrics import summarize_metrics
+from src.training.metrics import StreamingMetrics
 from src.training.train import collate_samples, default_split_months, load_config, paired_month_files, resolve_device, resolve_path
 
 
@@ -58,27 +58,23 @@ def build_month_datasets(config: dict, dynamic_dir: Path, target_dir: Path, trai
 def evaluate_model(model: nn.Module, dataset: WeatherGraphDataset, device: torch.device) -> dict[str, float]:
     loader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=0, collate_fn=collate_samples)
     model.eval()
-    preds = []
-    targets = []
+    accumulator = StreamingMetrics()
     with torch.no_grad():
         for batch in loader:
             x = batch["x"].to(device)
-            preds.append(model(x).cpu())
-            targets.append(batch["y"].cpu())
-    return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0), node_mask=dataset.in_region_mask)
+            accumulator.update(model(x), batch["y"].to(device), dataset.in_region_mask)
+    return accumulator.compute()
 
 
 def evaluate_xgboost_model(model, dataset: WeatherGraphDataset) -> dict[str, float]:
     loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_samples)
-    preds = []
-    targets = []
+    accumulator = StreamingMetrics()
     for batch in loader:
         x = batch["x"].reshape(-1, batch["x"].shape[-1]).numpy()
         y = batch["y"]
         pred = torch.from_numpy(model.predict(x)).reshape_as(y)
-        preds.append(pred)
-        targets.append(y)
-    return summarize_metrics(torch.cat(preds, dim=0), torch.cat(targets, dim=0), node_mask=dataset.in_region_mask)
+        accumulator.update(pred, y, dataset.in_region_mask)
+    return accumulator.compute()
 
 
 def interpolation_predict(x: torch.Tensor, coarse_indices: list[int]) -> torch.Tensor:
@@ -109,7 +105,7 @@ def train_mlp(config: dict, train_dataset: WeatherGraphDataset, val_dataset: Wea
     loader = DataLoader(
         train_dataset,
         batch_size=int(config["baselines"]["mlp"]["batch_size"]),
-        shuffle=True,
+        sampler=MonthlySampler(train_dataset),
         num_workers=0,
         collate_fn=collate_samples,
     )
@@ -133,16 +129,23 @@ def _sample_row_indices(length: int, max_rows: int, rng: random.Random) -> list[
 
 
 def rows_from_dataset(dataset: WeatherGraphDataset, max_rows: int, seed: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if max_rows <= 0:
+        raise ValueError("max_train_rows must be positive")
     rng = random.Random(seed)
-    indices = _sample_row_indices(len(dataset), max_rows, rng)
-    # ponytail: sample timesteps, not every node-time row; increase max_rows if xgboost underfits.
-    subset = Subset(dataset, indices)
-    loader = DataLoader(subset, batch_size=1, shuffle=False, num_workers=0, collate_fn=collate_samples)
+    nodes = dataset.static_x.shape[0]
+    indices = sorted(_sample_row_indices(len(dataset) * nodes, max_rows, rng))
     features = []
     targets = []
-    for batch in loader:
-        features.append(batch["x"].reshape(-1, batch["x"].shape[-1]))
-        targets.append(batch["y"].reshape(-1, batch["y"].shape[-1]))
+    from itertools import groupby
+    for timestep, rows in groupby(indices, key=lambda index: index // nodes):
+        sample = dataset[timestep]
+        selected = [index % nodes for index in rows]
+        x, y = sample["x"][selected], sample["y"][selected]
+        valid = torch.isfinite(x).all(-1) & torch.isfinite(y).all(-1)
+        features.append(x[valid])
+        targets.append(y[valid])
+    if not features or not sum(len(y) for y in targets):
+        raise ValueError("No finite sampled training rows")
     return torch.cat(features, dim=0), torch.cat(targets, dim=0)
 
 

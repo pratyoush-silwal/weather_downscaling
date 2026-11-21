@@ -8,6 +8,35 @@ import torch
 TARGET_NAMES = ["temperature", "precipitation", "u_wind", "v_wind"]
 
 
+class StreamingMetrics:
+    """Constant-memory sufficient statistics for RMSE, MAE and bias."""
+
+    def __init__(self):
+        self.totals = None
+
+    def update(self, prediction, target, node_mask=None):
+        mask = torch.isfinite(prediction) & torch.isfinite(target)
+        region = _expanded_node_mask(node_mask, prediction)
+        if region is not None:
+            mask &= region
+        error = torch.where(mask, prediction - target, 0).double()
+        dims = tuple(range(error.ndim - 1))
+        values = torch.stack([mask.sum(dims), error.square().sum(dims), error.abs().sum(dims), error.sum(dims)])
+        if self.totals is None:
+            self.totals = values
+        else:
+            self.totals += values
+
+    def compute(self):
+        if self.totals is None:
+            return {}
+        count, squared, absolute, signed = self.totals.cpu()
+        count = count.where(count > 0, float("nan"))
+        return {f"{name}_{metric}": float(value[i])
+                for metric, value in [("rmse", (squared / count).sqrt()), ("mae", absolute / count), ("bias", signed / count)]
+                for i, name in enumerate(TARGET_NAMES)}
+
+
 def _expanded_node_mask(node_mask: torch.Tensor | None, prediction: torch.Tensor) -> torch.Tensor | None:
     if node_mask is None:
         return None

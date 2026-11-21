@@ -35,6 +35,7 @@ class PIGNNConfig:
     use_coarse_temperature_residual: bool = True
     use_coarse_precipitation_residual: bool = True
     use_coarse_wind_residual: bool = True
+    checkpoint_blocks: bool = False
     input_offsets: tuple[float, ...] | None = None
     input_scales: tuple[float, ...] | None = None
     edge_scales: tuple[float, ...] | None = None
@@ -122,8 +123,14 @@ class PIGNN(nn.Module):
         encoded_edges = self.edge_encoder(edge_attr / self.edge_scale)
 
         h = self.node_encoder((x - self.input_offset) / self.input_scale)
+        edge_index = edge_index.to(x.device)
+        degree = torch.bincount(edge_index[1], minlength=x.shape[-2])
         for block in self.blocks:
-            h = block(h, edge_index.to(x.device), encoded_edges)
+            if self.config.checkpoint_blocks and self.training:
+                from torch.utils.checkpoint import checkpoint
+                h = checkpoint(block, h, edge_index, encoded_edges, degree, use_reentrant=False)
+            else:
+                h = block(h, edge_index, encoded_edges, degree)
 
         out = self.head(self.norm(h)) * self.output_scale
         return self._add_coarse_residuals(out, x)

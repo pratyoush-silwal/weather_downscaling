@@ -16,9 +16,9 @@ from torch.utils.data import DataLoader
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data.dataset import WeatherGraphDataset
+from src.data.dataset import WeatherGraphDataset, MonthlySampler
 from src.models import LossWeights, PIGNNLoss, build_pignn_from_config
-from src.training.metrics import summarize_metrics
+from src.training.metrics import StreamingMetrics
 
 
 def parse_args() -> argparse.Namespace:
@@ -54,6 +54,8 @@ def load_config(path: str | Path) -> dict:
 
 def resolve_device(device_name: str | None) -> torch.device:
     name = str(device_name or "auto").lower()
+    if name.startswith("cuda") and not torch.cuda.is_available():
+        raise ValueError("CUDA was requested but is unavailable")
     if name == "auto":
         name = "cuda" if torch.cuda.is_available() else "cpu"
     return torch.device(name)
@@ -125,38 +127,27 @@ def collate_samples(samples: list[dict]) -> dict:
     return batch
 
 
-def make_loader(graph_path: Path, dynamic_paths: list[Path], target_paths: list[Path], batch_size: int, shuffle: bool) -> DataLoader:
+def make_loader(graph_path: Path, dynamic_paths: list[Path], target_paths: list[Path], batch_size: int, shuffle: bool, workers: int = 0) -> DataLoader:
     dataset = WeatherGraphDataset(graph_path, dynamic_paths, target_paths)
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=0, collate_fn=collate_samples)
+    return DataLoader(dataset, batch_size=batch_size, sampler=MonthlySampler(dataset) if shuffle else None, num_workers=workers, collate_fn=collate_samples)
 
 
 def evaluate_epoch(model, loader, loss_fn, device: torch.device) -> tuple[float, dict[str, float]]:
     model.eval()
     loss_total = 0.0
-    pred_batches = []
-    target_batches = []
+    accumulator = StreamingMetrics()
+    edge_index, edge_attr, pos = (getattr(loader.dataset, k).to(device) for k in ("edge_index", "edge_attr", "pos"))
+    region = loader.dataset.in_region_mask.to(device)
     with torch.no_grad():
         for batch in loader:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
-            edge_index = batch["edge_index"].to(device)
-            edge_attr = batch["edge_attr"].to(device)
-            pos = batch["pos"].to(device)
             prediction = model(x, edge_index, edge_attr)
             losses = loss_fn(prediction, y, edge_index, x[..., 6], pos)
-            loss_total += float(losses["total"])
-            pred_batches.append(prediction.cpu())
-            target_batches.append(y.cpu())
-    metrics = (
-        summarize_metrics(
-            torch.cat(pred_batches, dim=0),
-            torch.cat(target_batches, dim=0),
-            node_mask=loader.dataset.in_region_mask,
-        )
-        if pred_batches
-        else {}
-    )
-    mean_loss = loss_total / max(len(loader), 1)
+            loss_total += losses["total"].detach().double()
+            accumulator.update(prediction, y, region)
+    metrics = accumulator.compute()
+    mean_loss = float(loss_total) / max(len(loader), 1)
     return mean_loss, metrics
 
 
@@ -181,6 +172,12 @@ def append_history_row(path: Path, row: dict[str, object]) -> None:
         if write_header:
             writer.writeheader()
         writer.writerow(row)
+
+
+def save_checkpoint(state, path):
+    temporary = path.with_suffix(".pt.part")
+    torch.save(state, temporary)
+    temporary.replace(path)
 
 
 def write_summary(
@@ -244,9 +241,10 @@ def main() -> None:
         raise ValueError("No training months selected")
 
     batch_size = int(config["training"]["batch_size"])
-    train_loader = make_loader(graph_path, [d for d, _ in train_pairs], [t for _, t in train_pairs], batch_size, True)
+    workers = int(config["training"].get("num_workers", 0))
+    train_loader = make_loader(graph_path, [d for d, _ in train_pairs], [t for _, t in train_pairs], batch_size, True, workers)
     val_loader = (
-        make_loader(graph_path, [d for d, _ in val_pairs], [t for _, t in val_pairs], batch_size, False)
+        make_loader(graph_path, [d for d, _ in val_pairs], [t for _, t in val_pairs], batch_size, False, workers)
         if val_pairs
         else None
     )
@@ -277,8 +275,17 @@ def main() -> None:
     best_val = float("inf")
     best_epoch = 0
     best_metrics: dict[str, float] = {}
+    progress = {}
+    interval = int(config["training"].get("recovery_steps", 0))
+    bf16 = bool(config["training"].get("cuda_bfloat16", False))
+    if bf16 and (device.type != "cuda" or not torch.cuda.is_bf16_supported()):
+        raise ValueError("cuda_bfloat16 requires a GPU with bfloat16 support")
     if args.resume and last_checkpoint_path.exists():
         checkpoint = torch.load(last_checkpoint_path, map_location="cpu", weights_only=False)
+        progress = checkpoint.get("progress", {})
+        if progress and (checkpoint["train_months"] != train_months or checkpoint["val_months"] != val_months
+                         or checkpoint["config"]["training"]["batch_size"] != batch_size):
+            raise ValueError("Cannot resume partial epoch with a different split or batch size")
         model.load_state_dict(checkpoint["model_state"])
         optimizer.load_state_dict(checkpoint["optimizer_state"])
         start_epoch = int(checkpoint["epoch"]) + 1
@@ -304,24 +311,42 @@ def main() -> None:
         )
         return
 
+    edge_index, edge_attr, pos = (getattr(train_loader.dataset, k).to(device) for k in ("edge_index", "edge_attr", "pos"))
     for epoch in range(start_epoch, epochs + 1):
         model.train()
-        running = 0.0
-        for batch in train_loader:
+        running = progress.get("running", 0.0)
+        step = progress.get("step", 0)
+        train_loader.sampler.seed = progress["seed"] if progress else int(torch.randint(2**31, ()).item())
+        train_loader.sampler.skip = step * batch_size
+        iterator = iter(train_loader)
+        if progress:
+            torch.set_rng_state(progress["cpu_rng"])
+            if device.type == "cuda":
+                torch.cuda.set_rng_state(progress["cuda_rng"], device)
+        progress = {}
+        for batch in iterator:
             x = batch["x"].to(device)
             y = batch["y"].to(device)
-            edge_index = batch["edge_index"].to(device)
-            edge_attr = batch["edge_attr"].to(device)
-            pos = batch["pos"].to(device)
             optimizer.zero_grad(set_to_none=True)
-            prediction = model(x, edge_index, edge_attr)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=bf16):
+                prediction = model(x, edge_index, edge_attr)
+            prediction = prediction.float()
             losses = loss_fn(prediction, y, edge_index, x[..., 6], pos)
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), float(config["training"]["gradient_clip_norm"]))
             optimizer.step()
-            running += float(losses["total"].detach())
+            running += losses["total"].detach().double()
+            step += 1
+            if interval > 0 and step % interval == 0:
+                save_checkpoint(dict(epoch=epoch-1, model_state=model.state_dict(), optimizer_state=optimizer.state_dict(),
+                                     config=config, train_months=train_months, val_months=val_months, test_months=test_months,
+                                     best_val_loss=best_val, best_epoch=best_epoch, best_metrics=best_metrics,
+                                     progress=dict(step=step, seed=train_loader.sampler.seed, running=float(running),
+                                                   cpu_rng=torch.get_rng_state(),
+                                                   cuda_rng=torch.cuda.get_rng_state(device) if device.type == "cuda" else None)),
+                                last_checkpoint_path)
 
-        train_loss = running / max(len(train_loader), 1)
+        train_loss = float(running) / max(len(train_loader), 1)
         print(f"epoch {epoch} train_loss={train_loss:.6f}")
 
         val_loss = train_loss
@@ -358,8 +383,8 @@ def main() -> None:
             checkpoint["best_val_loss"] = best_val
             checkpoint["best_epoch"] = best_epoch
             checkpoint["best_metrics"] = best_metrics
-            torch.save(checkpoint, checkpoint_dir / "best.pt")
-        torch.save(checkpoint, checkpoint_dir / "last.pt")
+            save_checkpoint(checkpoint, checkpoint_dir / "best.pt")
+        save_checkpoint(checkpoint, checkpoint_dir / "last.pt")
 
     write_summary(
         metrics_path,

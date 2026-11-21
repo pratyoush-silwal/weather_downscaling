@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import errno
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -70,12 +72,29 @@ def build_month(era5land_path: Path, output_path: Path, overwrite: bool) -> bool
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_suffix(output_path.suffix + ".part")
+    # Both names can reference one immutable package; preprocessing replaces
+    # files atomically, so rebuilding never mutates a previously published target.
+    if (era5land.get("target_names") == FINAL_TARGET_NAMES
+            and era5land.get("metadata", {}).get("era5land_file") == str(era5land_path)
+            and era5land["y"].dtype == torch.float32):
+        import tempfile
+        with tempfile.TemporaryDirectory(dir=output_path.parent) as directory:
+            link = Path(directory) / "target"
+            try:
+                os.link(era5land_path, link)
+            except OSError as exc:
+                if exc.errno not in (errno.EXDEV, errno.EPERM, errno.EOPNOTSUPP):
+                    raise
+            else:
+                link.replace(output_path)
+                return True
     torch.save(
         {
             "y": y,
             "timestamps": list(era5land["timestamps"]),
             "target_names": FINAL_TARGET_NAMES,
             "metadata": {
+                **era5land.get("metadata", {}),
                 "era5land_file": str(era5land_path),
                 "month": month_from_path(output_path),
             },

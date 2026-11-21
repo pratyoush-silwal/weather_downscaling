@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data.dataset import WeatherGraphDataset
 from src.models import build_pignn_from_config
-from src.training.metrics import summarize_metrics
+from src.training.metrics import StreamingMetrics
 from src.training.train import default_split_months, resolve_device
 
 
@@ -99,8 +99,7 @@ def main() -> None:
     model.to(device)
     model.eval()
 
-    predictions = []
-    targets_out = []
+    accumulator = StreamingMetrics()
     with torch.no_grad():
         for batch in loader:
             prediction = model(
@@ -108,14 +107,9 @@ def main() -> None:
                 batch["edge_index"].to(device),
                 batch["edge_attr"].to(device),
             )
-            predictions.append(prediction.cpu())
-            targets_out.append(batch["y"].cpu())
+            accumulator.update(prediction, batch["y"].to(device), dataset.in_region_mask)
 
-    metrics = summarize_metrics(
-        torch.cat(predictions, dim=0),
-        torch.cat(targets_out, dim=0),
-        node_mask=dataset.in_region_mask,
-    )
+    metrics = accumulator.compute()
     print(metrics)
 
 
