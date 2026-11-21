@@ -65,7 +65,37 @@ def variable_name(ds, logical_name: str) -> str:
 
 
 def _timestamps(ds) -> pd.DatetimeIndex:
-    return pd.DatetimeIndex(pd.to_datetime(ds[time_name(ds)].values)).sort_values()
+    times = pd.DatetimeIndex(pd.to_datetime(ds[time_name(ds)].values)).sort_values()
+    if times.has_duplicates or times.hasnans:
+        raise ValueError("ERA5-Land timestamps must be unique and non-missing")
+    if not times.equals(times.floor("h")):
+        raise ValueError("ERA5-Land timestamps must be on UTC hour boundaries")
+    return times
+
+
+def deaccumulate_precipitation(times, cumulative, previous_time=None, previous_value=None):
+    """Convert daily forecast accumulations to amounts ending at each UTC hour.
+
+    The 01 UTC record starts a new accumulation; all other hours require
+    the immediately preceding record. Missing predecessors remain NaN.
+    """
+    times = pd.DatetimeIndex(times)
+    if times.has_duplicates or not times.is_monotonic_increasing or times.hasnans:
+        raise ValueError("Precipitation timestamps must be unique and increasing")
+    values = np.asarray(cumulative, dtype=np.float64)
+    hourly = np.full_like(values, np.nan)
+    for index, timestamp in enumerate(times):
+        if timestamp.hour == 1:
+            hourly[index] = values[index]
+        else:
+            prior_time = times[index - 1] if index else previous_time
+            prior_value = values[index - 1] if index else previous_value
+            if prior_time is not None and timestamp - prior_time == pd.Timedelta(hours=1):
+                hourly[index] = values[index] - prior_value
+    # Only tolerate sub-micron rounding errors, not unexplained resets.
+    if np.any(hourly < -1e-7):
+        raise ValueError("Significant negative hourly precipitation after de-accumulation")
+    return np.maximum(hourly, 0)
 
 
 def _load_interp(xr, ds, logical_name: str, lat: np.ndarray, lon: np.ndarray, method: str):
@@ -102,12 +132,27 @@ def preprocess_month(
         _, u10 = _load_interp(xr, ds, "u10", lat, lon, method)
         _, v10 = _load_interp(xr, ds, "v10", lat, lon, method)
         if any(name in ds.data_vars for name in VARIABLE_CANDIDATES["tp"]):
+            precipitation_source = input_path
             precip_times, tp = _load_interp(xr, ds, "tp", lat, lon, method)
         elif precip_path.exists():
+            precipitation_source = precip_path
             with open_dataset(xr, precip_path) as precip_ds:
                 precip_times, tp = _load_interp(xr, precip_ds, "tp", lat, lon, method)
         else:
             raise FileNotFoundError(f"Missing precipitation for {yyyymm}: neither {input_path} nor {precip_path} has it")
+
+    previous_time = previous_value = None
+    previous_month = (pd.Timestamp(f"{yyyymm[:4]}-{yyyymm[4:]}-01") - pd.Timedelta(days=1)).strftime("%Y%m")
+    previous_path = precipitation_source.with_name(precipitation_source.name.replace(yyyymm, previous_month))
+    required_time = precip_times[0] - pd.Timedelta(hours=1)
+    if previous_path.exists() and precip_times[0].hour != 1:
+        with open_dataset(xr, previous_path) as previous_ds:
+            previous_times = _timestamps(previous_ds)
+            if required_time in previous_times:
+                selected = previous_ds.sel({time_name(previous_ds): [required_time]})
+                _, previous_values = _load_interp(xr, selected, "tp", lat, lon, method)
+                previous_time, previous_value = required_time, previous_values[0]
+    tp = deaccumulate_precipitation(precip_times, tp, previous_time, previous_value)
 
     common = timestamps.intersection(precip_times)
     if common.empty:
@@ -133,6 +178,16 @@ def preprocess_month(
                 "source_file": str(input_path),
                 "precipitation_file": str(precip_path if precip_path.exists() else input_path),
                 "interpolation": method,
+                "precipitation": {
+                    "accumulation": "hourly",
+                    "interval": "1h",
+                    "time_convention": "accumulation_ending_at_timestamp",
+                    "units": "m",
+                    "deaccumulated": True,
+                    "deaccumulation_rule": "01 UTC reset; otherwise adjacent-hour difference",
+                    "missing_predecessor": "masked_as_nan",
+                    "previous_source_file": str(previous_path) if previous_time is not None else None,
+                },
             },
         },
         tmp_path,
